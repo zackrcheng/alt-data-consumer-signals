@@ -90,12 +90,18 @@ TRENDS_LAG_WEEKS = 2
 
 # ── FRED macro series (Section 8b) ────────────────────────────────────────────
 FRED_SERIES = {
-    "UMCSENT": "University of Michigan Consumer Sentiment (monthly)",
-    "RSAFS": "Advance Retail Sales - Food Services & Drinking Places (monthly)",
-    "CPIUFDNS": "CPI - Food Away From Home (monthly)",
-    "DSPIC96": "Real Disposable Personal Income (monthly)",
-    "UNRATE": "Unemployment Rate (monthly)",
-    "USEPUINDXD": "Economic Policy Uncertainty Index (daily → resample monthly)",
+    "UMCSENT":       "University of Michigan Consumer Sentiment (monthly)",
+    "RSAFS":         "Advance Retail Sales - Food Services & Drinking Places (monthly)",
+    "CPIUFDNS":      "CPI - Food Away From Home (monthly)",
+    "DSPIC96":       "Real Disposable Personal Income (monthly)",
+    "UNRATE":        "Unemployment Rate (monthly)",
+    "USEPUINDXD":    "Economic Policy Uncertainty Index (daily → resample monthly)",
+    # Two-pronged supply-side labor signal for Dasher acquisition cost / EBITDA:
+    "JTS4000JOL":    "Job Openings: Trade, Transportation & Utilities (SA, thousands)",
+    # ↑ Proxy for gig/delivery labor market tightness. Declining from 2022 peak =
+    #   normalizing Dasher acquisition costs = margin tailwind for DASH EBITDA.
+    "CES4349200001": "All Employees: Couriers & Messengers (headcount, SA, monthly)",
+    # ↑ Narrower scope, direct courier industry employment.
 }
 
 MACRO_FEATURE_COLS = [
@@ -105,6 +111,8 @@ MACRO_FEATURE_COLS = [
     "cpi_food_mom_pct",
     "consumer_health_index",          # z-score composite of UMCSENT + DSPIC96
     "epu_index",
+    "jolts_transport_yoy",            # YoY % change in Trade/Transport/Utilities openings
+    "courier_employment_yoy",         # YoY % change in courier & messenger headcount
 ]
 
 # Most recent monthly value available 30 days before quarter-end (no look-ahead)

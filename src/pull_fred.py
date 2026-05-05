@@ -67,13 +67,20 @@ def pull_fred_series(
     if z_cols:
         df["consumer_health_index"] = df[z_cols].mean(axis=1)
 
-    # MoM % changes
+    # MoM / YoY % changes
     if "umcsent" in df.columns:
         df["umcsent_mom_pct"] = df["umcsent"].pct_change(fill_method=None) * 100
     if "rsafs" in df.columns:
         df["rsafs_yoy_pct"] = df["rsafs"].pct_change(12, fill_method=None) * 100
     if "cpiufdns" in df.columns:
         df["cpi_food_mom_pct"] = df["cpiufdns"].pct_change(fill_method=None) * 100
+
+    # Supply-side labor signal — YoY % change. Falling = labor market loosening
+    # = lower Dasher acquisition cost = EBITDA margin tailwind.
+    if "jts4000jol" in df.columns:
+        df["jolts_transport_yoy"] = df["jts4000jol"].pct_change(12, fill_method=None) * 100
+    if "ces4349200001" in df.columns:
+        df["courier_employment_yoy"] = df["ces4349200001"].pct_change(12, fill_method=None) * 100
 
     print_pull_summary("FRED macro (monthly)", df, "date")
     return df
