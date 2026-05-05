@@ -1,453 +1,688 @@
 """
-model_gov.py — DASH alt-data forecast across three target framings.
+model_gov.py — DASH GOV-surprise model comparison framework.
 
-Why three targets (motivation per the modeling note in the EDA):
-  • gov_yoy_growth_pct  — Total Marketplace GOV YoY. The headline number
-    consensus reports. Mixes US (signals are US-centric) with international
-    (Wolt + Deliveroo, structurally invisible to our features).
-  • orders_yoy_growth_pct — Cleaner alignment: alt-data is a frequency proxy,
-    orders IS frequency. AOV is priced by analysts, not by us.
-  • gov_surprise_pct — The L/S quantity directly: % beat vs FactSet consensus.
-    Stationary target; Deliveroo lives inside both sides of the surprise so it
-    cancels.
+  16 model variants  =  2 feature sets × 2 targets × 4 architectures
+  + 2 baselines (zero, trailing-4q mean)
 
-Two model variants per target (per Session 9 EDA):
-  drop_model — OLS on 5 features (drops dash_engagement_x_sentiment_mean, VIF=17).
-  pca_model  — OLS on 3 standalone + 1 PCA composite of the collinear cluster
-               {dash_engagement_x_sentiment_mean, revision_momentum_pct,
-               consumer_health_index}. PCA refit per fold.
+The comparison is selected on directional_acc (tiebreak rmse), then a
+quantile regression is fit on the chosen variant for the Q1 2026 80% CI.
+The result is written to a pre-registration CSV before earnings.
 
-Validation: expanding-window walk-forward starting Q1 2023 (8q minimum
-training). FRED `jolts_transport_yoy` is missing for Q1 2026 (publication
-lag) — imputed at predict time with trailing 4-quarter mean.
+Inputs (no look-ahead):
+  data/processed/master_df.csv         spine, features, targets
+  data/processed/dash_gov_master.csv   contribution_margin history
+  data/processed/uber_gov_master.csv   UBER delivery + total GB history
+  data/raw/google_trends.csv           weekly DoorDash index (for slope)
 
-Outputs (long format with `target` column):
-  outputs/tables/walk_forward_predictions.csv   — per-quarter predictions
-  outputs/tables/model_summary.csv              — RMSE / MAE / hit-rate
-  outputs/tables/q1_2026_forecast.csv           — final point + 80% CI
-  outputs/tables/model_coefficients.csv         — final-fit coef tables
-  outputs/figures/walk_forward.png              — 3 subplots (one per target)
+Targets:
+  TARGET_RAW = gov_surprise_pct
+  TARGET_STD = gov_surprise_pct / expanding_std,
+                where expanding_std = surprise.expanding(min_periods=4).std().shift(1)
+                (causal: at row t, divisor uses surprise[0..t-1] only)
+
+Feature sets:
+  CURRENT  = MODEL_FEATURE_COLS  (the 6 candidates from EDA Session 9)
+  EXTENDED = CURRENT + [
+      guidance_width_pct                 (mgmt's own uncertainty)
+      uber_delivery_surprise_lag1        (peer signal — known before quarter)
+      trends_slope                       (within-window trajectory)
+      contribution_margin_delta_lag1     (margin direction last quarter)
+  ]
+  All extended features are computed in this script with explicit lags
+  so the value at row t uses only data available before quarter_end_date[t].
+
+Q1 2026 forecast: jolts_transport_yoy is missing (FRED publication lag).
+We impute it with the trailing-4q mean from training data only — applied
+to the Q1 2026 row before any model fit (Session 9 decision).
+
+Outputs:
+  outputs/tables/model_comparison.csv       all 16 variants + baselines
+  outputs/tables/q1_2026_preregistered.csv  selected variant + CI
+  outputs/figures/walk_forward.png          actual vs predicted (top variant)
 """
 
+import datetime
 import warnings
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from sklearn.cross_decomposition import PLSRegression
 from sklearn.decomposition import PCA
+from sklearn.linear_model import RidgeCV
 from sklearn.preprocessing import StandardScaler
+from statsmodels.regression.quantile_regression import QuantReg
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 from src.config import (
-    MASTER_DF_PATH, FORECAST_QUARTER,
-    MODEL_FEATURE_COLS, CORROBORATING_COLS,
-    WALK_FORWARD_MIN_TRAIN_QUARTERS, WALK_FORWARD_VALIDATION_START,
-    OUTPUTS_TABLES, OUTPUTS_FIGURES, RANDOM_SEED,
+    MASTER_DF_PATH, DASH_GOV_MASTER_PATH, UBER_GOV_MASTER_PATH,
+    GOOGLE_TRENDS_PATH, FORECAST_QUARTER, MODEL_FEATURE_COLS, CORROBORATING_COLS,
+    WALK_FORWARD_MIN_TRAIN_QUARTERS, OUTPUTS_TABLES, OUTPUTS_FIGURES,
+    RANDOM_SEED, TRENDS_WINDOW_WEEKS, TRENDS_LAG_WEEKS, QUARTER_END_DATES,
     CHART_STYLE, COLORS,
 )
 
+np.random.seed(RANDOM_SEED)
 
-# ── Feature sets (Session 9 EDA decisions) ───────────────────────────────────
-DROP_FEATURES = [
-    "doordash_trends_momentum",
-    "consumer_health_index",
-    "prior_qtr_gov_surprise_pct",
-    "revision_momentum_pct",
-    "jolts_transport_yoy",
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+CURRENT_FEATURES = list(MODEL_FEATURE_COLS)            # 6 features
+EXTENDED_FEATURE_ADDS = [
+    "guidance_width_pct",
+    "uber_delivery_surprise_lag1",
+    "trends_slope",
+    "contribution_margin_delta_lag1",
 ]
+EXTENDED_FEATURES = CURRENT_FEATURES + EXTENDED_FEATURE_ADDS
 
-PCA_CLUSTER = [
-    "dash_engagement_x_sentiment_mean",
-    "revision_momentum_pct",
-    "consumer_health_index",
-]
-PCA_STANDALONE = [
-    "doordash_trends_momentum",
-    "prior_qtr_gov_surprise_pct",
-    "jolts_transport_yoy",
-]
-PCA_COMPOSITE_NAME = "frequency_signal_composite"
+TARGET_RAW = "gov_surprise_pct"
+TARGET_STD = "gov_surprise_std"
 
-# Disjointness invariant
-_all_used = set(DROP_FEATURES) | set(PCA_CLUSTER) | set(PCA_STANDALONE)
-assert _all_used.issubset(set(MODEL_FEATURE_COLS)), (
-    f"Features outside MODEL_FEATURE_COLS: {_all_used - set(MODEL_FEATURE_COLS)}")
-assert not (_all_used & set(CORROBORATING_COLS)), (
-    f"Model features collide with CORROBORATING_COLS: {_all_used & set(CORROBORATING_COLS)}")
+MIN_TRAIN_QUARTERS = WALK_FORWARD_MIN_TRAIN_QUARTERS   # 8
+MIN_VALID_TRAIN_ROWS = 6
+N_BOOTSTRAP = 500
+VIF_THRESHOLD = 10.0
 
 
-# ── Imputation ───────────────────────────────────────────────────────────────
+# ── Disjointness invariant ───────────────────────────────────────────────────
 
-def _trailing_4q_mean(history: pd.Series) -> float:
-    valid = history.dropna().tail(4)
-    return float(valid.mean()) if len(valid) else np.nan
-
-
-def _impute_row(test_row: pd.Series, train_df: pd.DataFrame,
-                feature_cols: list[str]) -> pd.Series:
-    out = test_row.copy()
-    for c in feature_cols:
-        if pd.isna(out[c]):
-            out[c] = _trailing_4q_mean(train_df[c])
-    return out
+assert set(CURRENT_FEATURES).issubset(set(MODEL_FEATURE_COLS)), \
+    "CURRENT_FEATURES must be a subset of MODEL_FEATURE_COLS"
+assert not (set(EXTENDED_FEATURES) & set(CORROBORATING_COLS)), \
+    f"EXTENDED features collide with CORROBORATING_COLS: " \
+    f"{set(EXTENDED_FEATURES) & set(CORROBORATING_COLS)}"
 
 
-# ── Per-target baselines ─────────────────────────────────────────────────────
+# ── Feature engineering ──────────────────────────────────────────────────────
 
-def _prior_qtr(df: pd.DataFrame, t: int, col: str) -> float:
-    return float(df[col].iloc[t - 1]) if t >= 1 and pd.notna(df[col].iloc[t - 1]) else np.nan
+def compute_extended_features(master: pd.DataFrame, dash_gov: pd.DataFrame,
+                               uber_gov: pd.DataFrame, trends: pd.DataFrame
+                               ) -> tuple[pd.DataFrame, list[str]]:
+    """Add the 4 EXTENDED features. All lags chosen so feature value at
+    row t uses only data available before quarter_end_date[t]."""
+    df = master.copy()
+    added = []
+
+    # 1. guidance_width_pct
+    width = (df["gov_guidance_high_mn"] - df["gov_guidance_low_mn"])
+    df["guidance_width_pct"] = (width / df["gov_guidance_mid_mn"]) * 100.0
+    added.append("guidance_width_pct")
+
+    # 2. uber_delivery_surprise_lag1
+    # Reconstruct delivery-segment-implied consensus from total-GB consensus
+    # and the prior-quarter delivery mix (mix is *known* before quarter t).
+    u = uber_gov.sort_values("quarter_end_date").set_index("quarter_label").copy()
+    delivery_mix = u["gb_delivery_actual_mn"] / u["gb_total_actual_mn"]
+    delivery_mix_lag1 = delivery_mix.shift(1)
+    implied_consensus = u["gb_total_factset_consensus_mn"] * delivery_mix_lag1
+    surprise = (u["gb_delivery_actual_mn"] - implied_consensus) / implied_consensus * 100.0
+    u["uber_delivery_surprise_lag1"] = surprise.shift(1)
+    df = df.merge(
+        u[["uber_delivery_surprise_lag1"]].reset_index(),
+        on="quarter_label", how="left",
+    )
+    added.append("uber_delivery_surprise_lag1")
+
+    # 3. trends_slope — slope of weekly DoorDash index over the 8-week
+    #    pre-quarter window (same window used by quarterly mean features).
+    t = trends.copy()
+    t["date"] = pd.to_datetime(t["date"])
+    slopes = {}
+    for q_label, qe_str in QUARTER_END_DATES.items():
+        qe = pd.Timestamp(qe_str)
+        win_end = qe - pd.Timedelta(weeks=TRENDS_LAG_WEEKS)
+        win_start = win_end - pd.Timedelta(weeks=TRENDS_WINDOW_WEEKS)
+        sub = t.loc[(t["date"] >= win_start) & (t["date"] < win_end),
+                    ["date", "DoorDash"]].dropna()
+        if len(sub) < 4:
+            slopes[q_label] = np.nan
+            continue
+        weeks = ((sub["date"] - sub["date"].min()).dt.days / 7.0).values
+        idx = sub["DoorDash"].values.astype(float)
+        slopes[q_label] = float(np.polyfit(weeks, idx, 1)[0])
+    df["trends_slope"] = df["quarter_label"].map(slopes)
+    added.append("trends_slope")
+
+    # 4. contribution_margin_delta_lag1 — at row t, this is
+    #    (margin[t-1] - margin[t-2]). Built from the dash_gov_master series
+    #    and shifted so it's strictly observed-before-t.
+    g = dash_gov.sort_values("quarter_end_date").set_index("quarter_label").copy()
+    cm_qoq = g["contribution_margin_pct"].diff()      # current - prior
+    cm_qoq_lag1 = cm_qoq.shift(1)                     # row t = QoQ as of t-1
+    df = df.merge(
+        cm_qoq_lag1.rename("contribution_margin_delta_lag1").reset_index(),
+        on="quarter_label", how="left",
+    )
+    added.append("contribution_margin_delta_lag1")
+
+    return df, added
 
 
-def _trail4q(df: pd.DataFrame, t: int, col: str) -> float:
-    if t < 4:
-        return np.nan
-    window = df[col].iloc[max(0, t - 4):t].dropna()
-    return float(window.mean()) if len(window) else np.nan
+def add_standardized_target(df: pd.DataFrame) -> pd.DataFrame:
+    """Add gov_surprise_std using causal expanding std."""
+    df = df.copy()
+    s = df[TARGET_RAW]
+    expanding_std = s.expanding(min_periods=4).std().shift(1)
+    df[TARGET_STD] = s / expanding_std
+    df["_expanding_std_for_surprise"] = expanding_std
+    return df
 
 
-def _factset_implied_yoy(df: pd.DataFrame, t: int,
-                          consensus_col: str, actual_col: str) -> float:
-    """YoY implied by FactSet consensus[t] vs actual[t-4]."""
-    if t < 4:
-        return np.nan
-    cons = df[consensus_col].iloc[t]
-    base = df[actual_col].iloc[t - 4]
-    if pd.isna(cons) or pd.isna(base) or base == 0:
-        return np.nan
-    return float((cons / base - 1.0) * 100.0)
-
-
-def _zero(_: pd.DataFrame, __: int) -> float:
-    return 0.0
-
-
-# ── Target configurations ────────────────────────────────────────────────────
-
-TargetConfig = dict
-TARGET_CONFIGS: dict[str, TargetConfig] = {
-    "gov_yoy_growth_pct": {
-        "label": "Total GOV YoY (%)",
-        "baselines": {
-            "baseline_prior":   lambda df, t: _prior_qtr(df, t, "gov_yoy_growth_pct"),
-            "baseline_trail4q": lambda df, t: _trail4q(df, t, "gov_yoy_growth_pct"),
-            "consensus":        lambda df, t: _factset_implied_yoy(
-                df, t, "gov_factset_consensus_mn", "gov_actual_mn"),
-        },
-        "benchmark": "consensus",
-    },
-    "orders_yoy_growth_pct": {
-        "label": "Orders YoY (%)",
-        "baselines": {
-            "baseline_prior":   lambda df, t: _prior_qtr(df, t, "orders_yoy_growth_pct"),
-            "baseline_trail4q": lambda df, t: _trail4q(df, t, "orders_yoy_growth_pct"),
-            "consensus":        lambda df, t: _factset_implied_yoy(
-                df, t, "orders_factset_consensus_mn", "orders_actual_mn"),
-        },
-        "benchmark": "consensus",
-    },
-    "gov_surprise_pct": {
-        "label": "GOV surprise vs consensus (pp)",
-        "baselines": {
-            # zero IS consensus by definition for a surprise target
-            "baseline_zero":    _zero,
-            "baseline_prior":   lambda df, t: _prior_qtr(df, t, "gov_surprise_pct"),
-            "baseline_trail4q": lambda df, t: _trail4q(df, t, "gov_surprise_pct"),
-        },
-        "benchmark": "baseline_zero",
-    },
-}
+def impute_forecast_row_jolts(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply the Session-9 imputation rule: any feature NaN in the Q1 2026
+    forecast row gets the trailing-4q mean from the historical series.
+    Only the FORECAST row is touched — training data is unchanged."""
+    df = df.copy()
+    fc_idx = df.index[df["quarter_label"] == FORECAST_QUARTER][0]
+    hist = df.iloc[:fc_idx]
+    for c in EXTENDED_FEATURES:
+        if c not in df.columns:
+            continue
+        if pd.isna(df.at[fc_idx, c]):
+            tail = hist[c].dropna().tail(4)
+            if len(tail):
+                df.at[fc_idx, c] = float(tail.mean())
+    return df
 
 
 # ── Models ───────────────────────────────────────────────────────────────────
 
-def _fit_drop(train: pd.DataFrame, target: str):
-    clean = train[DROP_FEATURES + [target]].dropna()
-    if len(clean) < WALK_FORWARD_MIN_TRAIN_QUARTERS:
-        return None
-    X = sm.add_constant(clean[DROP_FEATURES])
-    return sm.OLS(clean[target], X).fit()
+class OLSDrop:
+    """OLS with iterative VIF dropping (highest VIF removed until all < threshold)."""
+    def __init__(self, vif_threshold: float = VIF_THRESHOLD):
+        self.vif_threshold = vif_threshold
+        self.dropped_features: list[str] = []
+        self.kept_features: list[str] = []
+        self.fit_result = None
+
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series) -> "OLSDrop":
+        X = X_train.copy()
+        dropped = []
+        while X.shape[1] >= 2:
+            X_const = sm.add_constant(X, has_constant="add")
+            vifs = []
+            for col in X.columns:
+                idx = X_const.columns.get_loc(col)
+                vifs.append((col, variance_inflation_factor(X_const.values, idx)))
+            max_col, max_vif = max(vifs, key=lambda kv: kv[1])
+            if not np.isfinite(max_vif) or max_vif >= self.vif_threshold:
+                X = X.drop(columns=[max_col])
+                dropped.append(max_col)
+            else:
+                break
+        self.dropped_features = dropped
+        self.kept_features = list(X.columns)
+        self.fit_result = sm.OLS(y_train.values, sm.add_constant(X, has_constant="add")).fit()
+        return self
+
+    def predict(self, X_test: pd.DataFrame) -> np.ndarray:
+        X = X_test[self.kept_features]
+        return self.fit_result.predict(sm.add_constant(X, has_constant="add")).values
 
 
-def _predict_drop(fit, train: pd.DataFrame, test_row: pd.Series) -> float:
-    test_imp = _impute_row(test_row, train, DROP_FEATURES)
-    X = pd.DataFrame([test_imp[DROP_FEATURES].astype(float).values],
-                     columns=DROP_FEATURES)
-    X = sm.add_constant(X, has_constant="add")
-    return float(fit.predict(X).iloc[0])
+class PCAModel:
+    """StandardScaler → PCA(n=min(n_features, n_samples//3)) → OLS on PCs."""
+    def __init__(self):
+        self.scaler = None
+        self.pca = None
+        self.fit_result = None
+        self.feature_cols: list[str] = []
+        self.explained_variance_ratio_ = None
+
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series) -> "PCAModel":
+        n_samples, n_features = X_train.shape
+        nc = max(1, min(n_features, n_samples // 3))
+        self.scaler = StandardScaler()
+        X_z = self.scaler.fit_transform(X_train)
+        self.pca = PCA(n_components=nc, random_state=RANDOM_SEED)
+        Z = self.pca.fit_transform(X_z)
+        Z_df = pd.DataFrame(Z, columns=[f"PC{i+1}" for i in range(nc)])
+        self.fit_result = sm.OLS(y_train.values, sm.add_constant(Z_df)).fit()
+        self.feature_cols = list(X_train.columns)
+        self.explained_variance_ratio_ = self.pca.explained_variance_ratio_
+        return self
+
+    def predict(self, X_test: pd.DataFrame) -> np.ndarray:
+        X = X_test[self.feature_cols]
+        Z = self.pca.transform(self.scaler.transform(X))
+        Z_df = pd.DataFrame(Z, columns=[f"PC{i+1}" for i in range(Z.shape[1])])
+        return self.fit_result.predict(sm.add_constant(Z_df, has_constant="add")).values
 
 
-def _fit_pca(train: pd.DataFrame, target: str):
-    clean = train[PCA_CLUSTER + PCA_STANDALONE + [target]].dropna()
-    if len(clean) < WALK_FORWARD_MIN_TRAIN_QUARTERS:
-        return None
-    scaler = StandardScaler()
-    cluster_z = scaler.fit_transform(clean[PCA_CLUSTER])
-    pca = PCA(n_components=1, random_state=RANDOM_SEED)
-    pc1 = pca.fit_transform(cluster_z).flatten()
+class PLSModel:
+    """StandardScaler → PLSRegression(n_components=2). Maximizes covariance with target."""
+    def __init__(self, n_components: int = 2):
+        self.n_components = n_components
+        self.scaler = None
+        self.pls = None
+        self.feature_cols: list[str] = []
 
-    # Sign convention: PC1 loads positively on dash_engagement_x_sentiment_mean
-    eng_idx = PCA_CLUSTER.index("dash_engagement_x_sentiment_mean")
-    if pca.components_[0, eng_idx] < 0:
-        pca.components_ *= -1.0
-        pc1 = -pc1
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series) -> "PLSModel":
+        n_samples, n_features = X_train.shape
+        nc = max(1, min(self.n_components, n_features, n_samples - 1))
+        self.scaler = StandardScaler()
+        X_z = self.scaler.fit_transform(X_train)
+        self.pls = PLSRegression(n_components=nc)
+        self.pls.fit(X_z, y_train.values.reshape(-1, 1))
+        self.feature_cols = list(X_train.columns)
+        return self
 
-    X = clean[PCA_STANDALONE].copy().reset_index(drop=True)
-    X[PCA_COMPOSITE_NAME] = pc1
-    y = clean[target].reset_index(drop=True)
-    fit = sm.OLS(y, sm.add_constant(X)).fit()
-    return fit, scaler, pca
-
-
-def _predict_pca(model_tuple, train: pd.DataFrame, test_row: pd.Series) -> float:
-    fit, scaler, pca = model_tuple
-    test_imp = _impute_row(test_row, train, PCA_CLUSTER + PCA_STANDALONE)
-    cluster = pd.DataFrame([test_imp[PCA_CLUSTER].astype(float).values],
-                           columns=PCA_CLUSTER)
-    pc1 = pca.transform(scaler.transform(cluster)).flatten()[0]
-    X = pd.DataFrame([test_imp[PCA_STANDALONE].astype(float).tolist() + [pc1]],
-                     columns=PCA_STANDALONE + [PCA_COMPOSITE_NAME])
-    X = sm.add_constant(X, has_constant="add")
-    return float(fit.predict(X).iloc[0])
+    def predict(self, X_test: pd.DataFrame) -> np.ndarray:
+        X = X_test[self.feature_cols]
+        X_z = self.scaler.transform(X)
+        return self.pls.predict(X_z).flatten()
 
 
-# ── Per-target walk-forward ──────────────────────────────────────────────────
+class RidgeModel:
+    """StandardScaler → RidgeCV. Records selected alpha."""
+    def __init__(self, alphas=(0.01, 0.1, 1.0, 10.0, 100.0)):
+        self.alphas = list(alphas)
+        self.scaler = None
+        self.ridge = None
+        self.alpha_ = None
+        self.feature_cols: list[str] = []
 
-def run_walk_forward(df: pd.DataFrame, target: str) -> pd.DataFrame:
-    cfg = TARGET_CONFIGS[target]
-    val_start_idx = df.index[df["quarter_label"] == WALK_FORWARD_VALIDATION_START][0]
-    forecast_idx = df.index[df["quarter_label"] == FORECAST_QUARTER][0]
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series) -> "RidgeModel":
+        n = len(y_train)
+        cv = max(2, min(5, n))
+        self.scaler = StandardScaler()
+        X_z = self.scaler.fit_transform(X_train)
+        self.ridge = RidgeCV(alphas=self.alphas, cv=cv)
+        self.ridge.fit(X_z, y_train.values)
+        self.alpha_ = float(self.ridge.alpha_)
+        self.feature_cols = list(X_train.columns)
+        return self
 
+    def predict(self, X_test: pd.DataFrame) -> np.ndarray:
+        X = X_test[self.feature_cols]
+        X_z = self.scaler.transform(X)
+        return self.ridge.predict(X_z)
+
+
+MODEL_CLASSES: dict[str, type] = {
+    "ols_drop": OLSDrop,
+    "pca": PCAModel,
+    "pls": PLSModel,
+    "ridge": RidgeModel,
+}
+
+
+# ── Walk-forward driver ──────────────────────────────────────────────────────
+
+def run_walk_forward(df: pd.DataFrame, features: list[str], target: str,
+                     model_class: type) -> pd.DataFrame:
+    """Drop NaN rows from training; skip a quarter if test row is NaN
+    or if too few valid training rows remain."""
     rows = []
-    for t in range(val_start_idx, forecast_idx):
+    for t in range(MIN_TRAIN_QUARTERS, len(df)):
         actual = df[target].iloc[t]
         if pd.isna(actual):
             continue
-        train = df.iloc[:t]
-        test = df.iloc[t]
-
-        row = {
-            "target":           target,
-            "quarter_label":    test["quarter_label"],
-            "quarter_end_date": test["quarter_end_date"],
-            "actual":           actual,
-            "n_train":          len(train),
-        }
-        for name, fn in cfg["baselines"].items():
-            row[name] = fn(df, t)
-
-        drop_fit = _fit_drop(train, target)
-        pca_tuple = _fit_pca(train, target)
-        row["drop_model"] = _predict_drop(drop_fit, train, test) if drop_fit else np.nan
-        row["pca_model"]  = _predict_pca(pca_tuple, train, test) if pca_tuple else np.nan
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-# ── Per-target evaluation ────────────────────────────────────────────────────
-
-def evaluate(wf: pd.DataFrame, target: str) -> pd.DataFrame:
-    cfg = TARGET_CONFIGS[target]
-    bench = cfg["benchmark"]
-    predictor_cols = [c for c in wf.columns if c not in
-                      {"target", "quarter_label", "quarter_end_date", "actual", "n_train"}]
-    rows = []
-    for c in predictor_cols:
-        cols = list({c, "actual", bench})
-        sub = wf[cols].dropna()
-        if sub.empty or c not in sub.columns:
+        train_X = df[features].iloc[:t]
+        train_y = df[target].iloc[:t]
+        valid = train_X.notna().all(axis=1) & train_y.notna()
+        Xtr, ytr = train_X[valid], train_y[valid]
+        if len(Xtr) < MIN_VALID_TRAIN_ROWS:
             continue
-        err = sub[c] - sub["actual"]
-        rmse = float(np.sqrt((err ** 2).mean()))
-        mae = float(err.abs().mean())
-        # Hit = predictor's sign-vs-benchmark matches actual's sign-vs-benchmark.
-        # For surprise target the benchmark is zero (consensus); for the others
-        # the benchmark is the FactSet-implied-YoY consensus.
-        actual_dir = sub["actual"] >= sub[bench]
-        pred_dir = sub[c] >= sub[bench]
-        hit = float((actual_dir == pred_dir).mean())
-        rows.append({"target": target, "model": c, "n": len(sub),
-                     "rmse_pp": rmse, "mae_pp": mae,
-                     "hit_rate_vs_benchmark": hit})
+        test_X = df[features].iloc[[t]]
+        if test_X.isna().any().any():
+            continue
+        try:
+            model = model_class().fit(Xtr, ytr)
+            pred = float(model.predict(test_X)[0])
+        except Exception as e:
+            continue
+        rows.append({
+            "quarter_label": df["quarter_label"].iloc[t],
+            "predicted": pred,
+            "actual": float(actual),
+        })
     return pd.DataFrame(rows)
 
 
-# ── Per-target Q1 2026 forecast with bootstrap CI ────────────────────────────
+def evaluate(wf: pd.DataFrame) -> dict:
+    if wf.empty:
+        return {"rmse": np.nan, "mae": np.nan, "directional_acc": np.nan, "n_valid": 0}
+    err = wf["predicted"] - wf["actual"]
+    return {
+        "rmse": float(np.sqrt((err ** 2).mean())),
+        "mae":  float(err.abs().mean()),
+        "directional_acc": float((np.sign(wf["predicted"]) == np.sign(wf["actual"])).mean()),
+        "n_valid": len(wf),
+    }
 
-def forecast_q1_2026(df: pd.DataFrame, wf: pd.DataFrame, target: str,
-                     n_boot: int = 2000) -> pd.DataFrame:
-    cfg = TARGET_CONFIGS[target]
+
+# ── Q1 2026 prediction with bootstrap CI ─────────────────────────────────────
+
+def predict_q1_2026(df: pd.DataFrame, features: list[str], target: str,
+                     model_class: type, n_boot: int = N_BOOTSTRAP) -> dict:
+    fc_idx = df.index[df["quarter_label"] == FORECAST_QUARTER][0]
+    train = df.iloc[:fc_idx]
+    test = df.iloc[[fc_idx]]
+    valid = train[features].notna().all(axis=1) & train[target].notna()
+    Xtr, ytr = train[features][valid], train[target][valid]
+    if len(Xtr) < MIN_VALID_TRAIN_ROWS or test[features].isna().any().any():
+        return {"point": np.nan, "ci_lo": np.nan, "ci_hi": np.nan}
+    try:
+        model = model_class().fit(Xtr, ytr)
+        point = float(model.predict(test[features])[0])
+    except Exception:
+        return {"point": np.nan, "ci_lo": np.nan, "ci_hi": np.nan}
+
     rng = np.random.default_rng(RANDOM_SEED)
-    forecast_idx = df.index[df["quarter_label"] == FORECAST_QUARTER][0]
-    train = df.iloc[:forecast_idx]
-    test = df.iloc[forecast_idx]
-
-    drop_fit = _fit_drop(train, target)
-    pca_tuple = _fit_pca(train, target)
-
-    drop_pt = _predict_drop(drop_fit, train, test) if drop_fit else np.nan
-    pca_pt  = _predict_pca(pca_tuple, train, test) if pca_tuple else np.nan
-
-    def _ci(point: float, residuals: np.ndarray) -> tuple[float, float]:
-        if pd.isna(point) or len(residuals) == 0:
-            return (np.nan, np.nan)
-        sims = point + rng.choice(residuals, size=n_boot, replace=True)
-        return (float(np.percentile(sims, 10)), float(np.percentile(sims, 90)))
-
-    drop_resid = (wf["actual"] - wf["drop_model"]).dropna().values
-    pca_resid = (wf["actual"] - wf["pca_model"]).dropna().values
-
-    drop_lo, drop_hi = _ci(drop_pt, drop_resid)
-    pca_lo, pca_hi   = _ci(pca_pt,  pca_resid)
-
-    # Benchmark point estimate (the relevant consensus / zero baseline)
-    bench_fn = cfg["baselines"][cfg["benchmark"]]
-    bench_pt = bench_fn(df, forecast_idx)
-
-    rows = [
-        {"target": target, "model": "drop_model",
-         "predicted_value": drop_pt, "ci80_lo": drop_lo, "ci80_hi": drop_hi,
-         "vs_benchmark_pp": (drop_pt - bench_pt) if pd.notna(drop_pt) else np.nan,
-         "benchmark_value": bench_pt, "benchmark_name": cfg["benchmark"]},
-        {"target": target, "model": "pca_model",
-         "predicted_value": pca_pt, "ci80_lo": pca_lo, "ci80_hi": pca_hi,
-         "vs_benchmark_pp": (pca_pt - bench_pt) if pd.notna(pca_pt) else np.nan,
-         "benchmark_value": bench_pt, "benchmark_name": cfg["benchmark"]},
-        {"target": target, "model": cfg["benchmark"],
-         "predicted_value": bench_pt, "ci80_lo": np.nan, "ci80_hi": np.nan,
-         "vs_benchmark_pp": 0.0,
-         "benchmark_value": bench_pt, "benchmark_name": cfg["benchmark"]},
-    ]
-    return pd.DataFrame(rows)
+    n = len(Xtr)
+    boots = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        Xb = Xtr.iloc[idx].reset_index(drop=True)
+        yb = ytr.iloc[idx].reset_index(drop=True)
+        try:
+            mb = model_class().fit(Xb, yb)
+            boots.append(float(mb.predict(test[features])[0]))
+        except Exception:
+            continue
+    if not boots:
+        return {"point": point, "ci_lo": np.nan, "ci_hi": np.nan}
+    return {
+        "point": point,
+        "ci_lo": float(np.percentile(boots, 10)),
+        "ci_hi": float(np.percentile(boots, 90)),
+    }
 
 
-def build_coefficient_table(df: pd.DataFrame, target: str) -> pd.DataFrame:
-    forecast_idx = df.index[df["quarter_label"] == FORECAST_QUARTER][0]
-    train = df.iloc[:forecast_idx]
+# ── Baselines ────────────────────────────────────────────────────────────────
 
+def baseline_zero_walk_forward(df: pd.DataFrame, target: str = TARGET_RAW) -> pd.DataFrame:
     rows = []
-    drop_fit = _fit_drop(train, target)
-    if drop_fit is not None:
-        for name in drop_fit.params.index:
-            rows.append({"target": target, "model": "drop_model", "feature": name,
-                         "coef": float(drop_fit.params[name]),
-                         "stderr": float(drop_fit.bse[name]),
-                         "p_value": float(drop_fit.pvalues[name])})
-        rows.append({"target": target, "model": "drop_model", "feature": "_R_squared",
-                     "coef": float(drop_fit.rsquared), "stderr": np.nan,
-                     "p_value": float(drop_fit.f_pvalue)})
-
-    pca_tuple = _fit_pca(train, target)
-    if pca_tuple is not None:
-        pca_fit = pca_tuple[0]
-        for name in pca_fit.params.index:
-            rows.append({"target": target, "model": "pca_model", "feature": name,
-                         "coef": float(pca_fit.params[name]),
-                         "stderr": float(pca_fit.bse[name]),
-                         "p_value": float(pca_fit.pvalues[name])})
-        rows.append({"target": target, "model": "pca_model", "feature": "_R_squared",
-                     "coef": float(pca_fit.rsquared), "stderr": np.nan,
-                     "p_value": float(pca_fit.f_pvalue)})
+    for t in range(MIN_TRAIN_QUARTERS, len(df)):
+        actual = df[target].iloc[t]
+        if pd.isna(actual):
+            continue
+        rows.append({"quarter_label": df["quarter_label"].iloc[t],
+                     "predicted": 0.0, "actual": float(actual)})
     return pd.DataFrame(rows)
 
 
-# ── Combined plot ────────────────────────────────────────────────────────────
+def baseline_trail4q_walk_forward(df: pd.DataFrame, target: str = TARGET_RAW) -> pd.DataFrame:
+    rows = []
+    for t in range(MIN_TRAIN_QUARTERS, len(df)):
+        actual = df[target].iloc[t]
+        if pd.isna(actual):
+            continue
+        window = df[target].iloc[max(0, t - 4):t].dropna()
+        if not len(window):
+            continue
+        rows.append({"quarter_label": df["quarter_label"].iloc[t],
+                     "predicted": float(window.mean()),
+                     "actual": float(actual)})
+    return pd.DataFrame(rows)
 
-def plot_walk_forward(wf_all: pd.DataFrame, q1_all: pd.DataFrame, out_path: Path) -> None:
+
+# ── Plot ─────────────────────────────────────────────────────────────────────
+
+def plot_top_variant(df: pd.DataFrame, top_features: list[str], top_target: str,
+                     top_model_cls: type, top_name: str, q1_pred: dict,
+                     out_path: Path) -> None:
     import matplotlib.pyplot as plt
     plt.rcParams.update(CHART_STYLE)
 
-    targets = list(TARGET_CONFIGS.keys())
-    fig, axes = plt.subplots(len(targets), 1, figsize=(13, 4 * len(targets)),
-                             sharex=False)
-    for ax, target in zip(axes, targets):
-        wf = wf_all[wf_all["target"] == target]
-        cfg = TARGET_CONFIGS[target]
-        bench = cfg["benchmark"]
+    wf = run_walk_forward(df, top_features, top_target, top_model_cls)
+    if wf.empty:
+        return
+    fig, ax = plt.subplots(figsize=(13, 5))
+    ax.plot(wf["quarter_label"], wf["actual"], "o-", lw=2.5,
+            color=COLORS["actual"], label="Actual surprise (pp or σ)")
+    ax.plot(wf["quarter_label"], wf["predicted"], "^--", lw=2,
+            color=COLORS["dash_primary"], label=f"Predicted ({top_name})")
+    ax.axhline(0, color="grey", lw=0.5)
 
-        ax.plot(wf["quarter_label"], wf["actual"], "o-", lw=2.5,
-                color=COLORS["actual"], label=f"Actual {cfg['label']}")
-        if bench in wf.columns:
-            ax.plot(wf["quarter_label"], wf[bench], "s--",
-                    color=COLORS["consensus"], label=f"{bench} (benchmark)")
-        ax.plot(wf["quarter_label"], wf["drop_model"], "^--", alpha=0.85,
-                color=COLORS["dash_primary"], label="drop_model")
-        ax.plot(wf["quarter_label"], wf["pca_model"], "v--", alpha=0.85,
-                color=COLORS["forecast"], label="pca_model")
-
-        # Q1 2026 forecast points with CI
-        fc = q1_all[q1_all["target"] == target].set_index("model")
-        x_fc = "Q1_2026"
-        for m, color in [("drop_model", COLORS["dash_primary"]),
-                         ("pca_model", COLORS["forecast"])]:
-            if m not in fc.index:
-                continue
-            pt = fc.loc[m, "predicted_value"]
-            lo, hi = fc.loc[m, "ci80_lo"], fc.loc[m, "ci80_hi"]
-            if pd.notna(pt):
-                ax.errorbar([x_fc], [pt],
-                            yerr=[[pt - lo], [hi - pt]] if pd.notna(lo) else None,
-                            fmt="*", ms=12, color=color)
-        if bench in fc.index:
-            bench_pt = fc.loc[bench, "predicted_value"]
-            if pd.notna(bench_pt):
-                ax.scatter([x_fc], [bench_pt], marker="s", s=80,
-                           color=COLORS["consensus"])
-
-        ax.axhline(0, color="grey", lw=0.5)
-        ax.set_title(f"{cfg['label']}  •  walk-forward + Q1 2026")
-        ax.set_ylabel(cfg["label"])
-        ax.legend(loc="upper left", fontsize=8, ncol=2)
-        ax.tick_params(axis="x", rotation=45, labelsize=8)
-
+    pt, lo, hi = q1_pred["point"], q1_pred["ci_lo"], q1_pred["ci_hi"]
+    if pd.notna(pt):
+        yerr = [[pt - lo], [hi - pt]] if pd.notna(lo) and pd.notna(hi) else None
+        ax.errorbar(["Q1_2026"], [pt], yerr=yerr, fmt="*", ms=14,
+                    color=COLORS["forecast"], label=f"Q1 2026 = {pt:+.2f}")
+    ax.set_title(f"Top variant walk-forward: {top_name}")
+    ax.set_ylabel("surprise (pp or σ, depending on target)")
+    ax.legend(fontsize=9)
+    ax.tick_params(axis="x", rotation=45, labelsize=8)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
 
 
-# ── Driver ───────────────────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    df = (pd.read_csv(MASTER_DF_PATH, parse_dates=["quarter_end_date"])
-            .sort_values("quarter_end_date").reset_index(drop=True))
-
     OUTPUTS_TABLES.mkdir(parents=True, exist_ok=True)
     OUTPUTS_FIGURES.mkdir(parents=True, exist_ok=True)
 
-    wf_frames, summary_frames, q1_frames, coef_frames = [], [], [], []
-    for target in TARGET_CONFIGS:
-        wf = run_walk_forward(df, target)
-        wf_frames.append(wf)
-        summary_frames.append(evaluate(wf, target))
-        q1_frames.append(forecast_q1_2026(df, wf, target))
-        coef_frames.append(build_coefficient_table(df, target))
+    master = (pd.read_csv(MASTER_DF_PATH, parse_dates=["quarter_end_date"])
+                .sort_values("quarter_end_date").reset_index(drop=True))
+    dash_gov = pd.read_csv(DASH_GOV_MASTER_PATH, parse_dates=["quarter_end_date"])
+    uber_gov = pd.read_csv(UBER_GOV_MASTER_PATH, parse_dates=["quarter_end_date"])
+    trends = pd.read_csv(GOOGLE_TRENDS_PATH, parse_dates=["date"])
 
-    wf_all      = pd.concat(wf_frames, ignore_index=True)
-    summary_all = pd.concat(summary_frames, ignore_index=True)
-    q1_all      = pd.concat(q1_frames, ignore_index=True)
-    coef_all    = pd.concat(coef_frames, ignore_index=True)
+    # Look-ahead guard
+    assert master[master["quarter_label"] == FORECAST_QUARTER]["gov_actual_mn"].isna().all(), \
+        "Look-ahead contamination: Q1 2026 actual must be NaN throughout"
 
-    wf_all.to_csv(OUTPUTS_TABLES / "walk_forward_predictions.csv", index=False)
-    summary_all.to_csv(OUTPUTS_TABLES / "model_summary.csv", index=False)
-    q1_all.to_csv(OUTPUTS_TABLES / "q1_2026_forecast.csv", index=False)
-    coef_all.to_csv(OUTPUTS_TABLES / "model_coefficients.csv", index=False)
+    # Compute extended features
+    df, added = compute_extended_features(master, dash_gov, uber_gov, trends)
+    df = add_standardized_target(df)
+    df = impute_forecast_row_jolts(df)
 
-    plot_walk_forward(wf_all, q1_all, OUTPUTS_FIGURES / "walk_forward.png")
+    print(f"Added EXTENDED features: {added}")
+    hist = df[df["quarter_label"] != FORECAST_QUARTER]
+    print(f"Coverage on historical sample (n={len(hist)}):")
+    for c in added:
+        n = hist[c].notna().sum()
+        print(f"  {c:36s} {n}/{len(hist)} ({100*n/len(hist):3.0f}%)")
+    print(f"Q1 2026 row feature presence:")
+    fc_row = df[df["quarter_label"] == FORECAST_QUARTER].iloc[0]
+    for c in EXTENDED_FEATURES:
+        v = fc_row.get(c)
+        print(f"  {c:36s} {'NaN' if pd.isna(v) else f'{v:+.3f}'}")
+    print()
 
-    for target in TARGET_CONFIGS:
-        cfg = TARGET_CONFIGS[target]
-        print(f"\n{'='*72}\n  {target}  ({cfg['label']})\n{'='*72}")
-        print("\nWalk-forward predictions:")
-        wf_t = wf_all[wf_all["target"] == target].drop(columns=["target", "quarter_end_date"])
-        print(wf_t.round(2).to_string(index=False))
-        print("\nSummary (lower RMSE/MAE = better; hit = sign-vs-benchmark match):")
-        s = summary_all[summary_all["target"] == target].drop(columns=["target"])
-        print(s.round(3).to_string(index=False))
-        print("\nQ1 2026 forecast (80% CI from walk-forward residual bootstrap):")
-        q = q1_all[q1_all["target"] == target].drop(columns=["target"])
-        print(q.round(2).to_string(index=False))
+    # Forecast-time conversion factor for std target
+    surprise_hist = hist[TARGET_RAW].dropna()
+    forecast_expanding_std = float(surprise_hist.expanding(min_periods=4).std().iloc[-1])
+    print(f"Expanding std as of Q1 2026 (for unstandardizing): {forecast_expanding_std:.3f}pp")
+    print()
+
+    # Run all variants
+    feature_sets = {"current": CURRENT_FEATURES, "extended": EXTENDED_FEATURES}
+    targets = [TARGET_RAW, TARGET_STD]
+
+    rows = []
+    for fset_name, fset in feature_sets.items():
+        for target in targets:
+            for model_name, model_cls in MODEL_CLASSES.items():
+                variant = f"{fset_name}__{target}__{model_name}"
+                try:
+                    wf = run_walk_forward(df, fset, target, model_cls)
+                    metrics = evaluate(wf)
+                    fcst = predict_q1_2026(df, fset, target, model_cls)
+                    if target == TARGET_STD:
+                        pred_pct = (fcst["point"] * forecast_expanding_std
+                                    if pd.notna(fcst["point"]) else np.nan)
+                        ci_lo_pct = (fcst["ci_lo"] * forecast_expanding_std
+                                     if pd.notna(fcst["ci_lo"]) else np.nan)
+                        ci_hi_pct = (fcst["ci_hi"] * forecast_expanding_std
+                                     if pd.notna(fcst["ci_hi"]) else np.nan)
+                    else:
+                        pred_pct, ci_lo_pct, ci_hi_pct = fcst["point"], fcst["ci_lo"], fcst["ci_hi"]
+                    rows.append({
+                        "variant_name": variant, "target": target,
+                        "features": fset_name, "model": model_name,
+                        **metrics,
+                        "q1_2026_pred_raw": fcst["point"],
+                        "q1_2026_pred_pct": pred_pct,
+                        "q1_2026_ci_80_lo": ci_lo_pct,
+                        "q1_2026_ci_80_hi": ci_hi_pct,
+                    })
+                except Exception as e:
+                    print(f"  {variant} FAILED: {e}")
+
+    # Baselines (target = TARGET_RAW; results applicable to all variants)
+    zero_wf = baseline_zero_walk_forward(df)
+    zero_metrics = evaluate(zero_wf)
+    trail4q_wf = baseline_trail4q_walk_forward(df)
+    trail4q_metrics = evaluate(trail4q_wf)
+    trail4q_q1_pred = float(df[TARGET_RAW].dropna().tail(4).mean())
+
+    rows.append({"variant_name": "baseline_zero", "target": TARGET_RAW,
+                 "features": "-", "model": "baseline",
+                 **zero_metrics,
+                 "q1_2026_pred_raw": 0.0, "q1_2026_pred_pct": 0.0,
+                 "q1_2026_ci_80_lo": np.nan, "q1_2026_ci_80_hi": np.nan})
+    rows.append({"variant_name": "baseline_trail4q", "target": TARGET_RAW,
+                 "features": "-", "model": "baseline",
+                 **trail4q_metrics,
+                 "q1_2026_pred_raw": trail4q_q1_pred,
+                 "q1_2026_pred_pct": trail4q_q1_pred,
+                 "q1_2026_ci_80_lo": np.nan, "q1_2026_ci_80_hi": np.nan})
+
+    comp = pd.DataFrame(rows)
+    comp["rmse_vs_zero"] = comp["rmse"] - zero_metrics["rmse"]
+    comp["rmse_vs_trail4q"] = comp["rmse"] - trail4q_metrics["rmse"]
+    comp = comp.sort_values(["directional_acc", "rmse"],
+                            ascending=[False, True]).reset_index(drop=True)
+
+    comp.to_csv(OUTPUTS_TABLES / "model_comparison.csv", index=False)
+    print("\n=== Model comparison (sorted by directional_acc desc, rmse asc) ===")
+    print(comp.round(3).to_string(index=False))
+    print()
+
+    # Directional consensus on Q1 2026 (model variants only)
+    model_only = comp[comp["model"] != "baseline"]
+    signs = np.sign(model_only["q1_2026_pred_pct"].dropna())
+    if len(set(signs.values.tolist())) == 1:
+        direction = "beat" if signs.iloc[0] > 0 else "miss"
+        print(f"Directional consensus: all {len(model_only)} variants predict {direction}.")
+    else:
+        n_beat = int((signs > 0).sum())
+        n_miss = int((signs < 0).sum())
+        n_zero = int((signs == 0).sum())
+        print(f"Directional split: {n_beat} beat / {n_miss} miss / {n_zero} zero (out of {len(model_only)} variants).")
+    print()
+
+    # === Top variant selection ===
+    top = model_only.iloc[0]
+    second = model_only.iloc[1]
+    top_features = feature_sets[top["features"]]
+    top_target = top["target"]
+    top_model_cls = MODEL_CLASSES[top["model"]]
+
+    print(f"Top variant: {top['variant_name']}")
+    print(f"  directional_acc = {top['directional_acc']:.3f}")
+    print(f"  rmse            = {top['rmse']:.3f}")
+    print(f"  n_valid         = {int(top['n_valid'])}")
+    print()
+
+    # === Quantile regression on top variant for the CI we publish ===
+    fc_idx = df.index[df["quarter_label"] == FORECAST_QUARTER][0]
+    train = df.iloc[:fc_idx]
+    test = df.iloc[[fc_idx]]
+    valid = train[top_features].notna().all(axis=1) & train[top_target].notna()
+    Xtr, ytr = train[top_features][valid], train[top_target][valid]
+
+    quant_preds: dict[float, float] = {}
+    for q in (0.10, 0.50, 0.90):
+        try:
+            qr = QuantReg(ytr.values, sm.add_constant(Xtr, has_constant="add")).fit(q=q)
+            test_X = sm.add_constant(test[top_features], has_constant="add")
+            quant_preds[q] = float(qr.predict(test_X).iloc[0])
+        except Exception as e:
+            quant_preds[q] = np.nan
+
+    print(f"QuantReg predictions on top variant:")
+    for q, p in quant_preds.items():
+        if pd.isna(p):
+            print(f"  q={q:.2f}  NaN")
+        else:
+            disp = (p * forecast_expanding_std) if top_target == TARGET_STD else p
+            unit = "pp" if top_target == TARGET_RAW else f"σ → {disp:+.2f}pp"
+            print(f"  q={q:.2f}  raw = {p:+.3f}  ({unit})")
+    print()
+
+    # Convert quantile preds + CI to pp if needed
+    if top_target == TARGET_STD:
+        q_pp = {q: (p * forecast_expanding_std if pd.notna(p) else np.nan)
+                for q, p in quant_preds.items()}
+    else:
+        q_pp = quant_preds
+
+    # === Pre-registration ===
+    pred_pct = float(top["q1_2026_pred_pct"])
+    ci_lo = q_pp.get(0.10, top["q1_2026_ci_80_lo"])
+    ci_hi = q_pp.get(0.90, top["q1_2026_ci_80_hi"])
+
+    direction_call = "beat" if pred_pct > 0 else ("miss" if pred_pct < 0 else "tie")
+    if pd.notna(ci_lo) and ci_lo > 0:
+        conviction = "high"
+    elif pd.notna(ci_lo) and pd.notna(ci_hi) and ci_lo < 0 < ci_hi:
+        conviction = "low"
+    else:
+        conviction = "low"
+
+    rationale = (
+        f"Selected by directional_acc={top['directional_acc']:.3f}, rmse={top['rmse']:.3f}. "
+        f"Beat runner-up {second['variant_name']} "
+        f"(dir_acc={second['directional_acc']:.3f}, rmse={second['rmse']:.3f}). "
+        f"Top variant beat baseline_zero by {top['rmse_vs_zero']:+.2f}pp RMSE "
+        f"and baseline_trail4q by {top['rmse_vs_trail4q']:+.2f}pp."
+    )
+
+    prereg = pd.DataFrame([{
+        "timestamp":            datetime.datetime.utcnow().isoformat(),
+        "selected_variant":     top["variant_name"],
+        "target":               top_target,
+        "feature_set":          ",".join(top_features),
+        "model_architecture":   top["model"],
+        "q1_2026_pred_pct":     pred_pct,
+        "q1_2026_ci_80_lo":     ci_lo,
+        "q1_2026_ci_80_hi":     ci_hi,
+        "directional_call":     direction_call,
+        "conviction":           conviction,
+        "walk_forward_dir_acc": top["directional_acc"],
+        "selection_rationale":  rationale,
+        "note":                 "Pre-registered before Q1 2026 earnings May 6 2026",
+    }])
+    prereg.to_csv(OUTPUTS_TABLES / "q1_2026_preregistered.csv", index=False)
+
+    # Plot
+    plot_top_variant(df, top_features, top_target, top_model_cls,
+                     top["variant_name"],
+                     {"point": top["q1_2026_pred_raw"], "ci_lo": ci_lo, "ci_hi": ci_hi}
+                     if top_target == TARGET_RAW else
+                     {"point": top["q1_2026_pred_raw"],
+                      "ci_lo": ci_lo / forecast_expanding_std if pd.notna(ci_lo) else np.nan,
+                      "ci_hi": ci_hi / forecast_expanding_std if pd.notna(ci_hi) else np.nan},
+                     OUTPUTS_FIGURES / "walk_forward.png")
+
+    print("=" * 72)
+    print("PRE-REGISTRATION FILE CONTENTS  (outputs/tables/q1_2026_preregistered.csv)")
+    print("=" * 72)
+    for col, val in prereg.iloc[0].items():
+        if isinstance(val, float):
+            print(f"  {col:24s} {val:+.4f}" if pd.notna(val) else f"  {col:24s} NaN")
+        else:
+            print(f"  {col:24s} {val}")
+    print("=" * 72)
+    print()
+    print("PRE-REGISTERED FORECAST (plain English):")
+    print(f"  Selected variant: {top['variant_name']}")
+    print(f"  Q1 2026 GOV surprise prediction: {pred_pct:+.2f}pp ({direction_call})")
+    if pd.notna(ci_lo) and pd.notna(ci_hi):
+        print(f"  80% CI from quantile regression: [{ci_lo:+.2f}, {ci_hi:+.2f}] pp")
+    print(f"  Walk-forward directional accuracy: {top['directional_acc']:.0%} on n={int(top['n_valid'])}")
+    print(f"  Conviction: {conviction}")
+    print(f"  Rationale: {rationale}")
 
 
 if __name__ == "__main__":
-    warnings.filterwarnings("ignore", category=FutureWarning)
+    warnings.filterwarnings("ignore")
     main()
