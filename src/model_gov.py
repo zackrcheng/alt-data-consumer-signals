@@ -88,6 +88,9 @@ TARGETS_ALL = [TARGET_RAW, TARGET_STD, TARGET_DEMEAN_4Q, TARGET_DEMEAN_EXPANDING
 
 MIN_TRAIN_QUARTERS = WALK_FORWARD_MIN_TRAIN_QUARTERS   # 8
 MIN_VALID_TRAIN_ROWS = 6
+MIN_VALID_FOR_TOP_PICK = 8     # variants with fewer walk-forward predictions are
+                                # ineligible to be the top variant (RMSE rankings
+                                # at n<8 are dominated by sample luck, not signal)
 N_BOOTSTRAP = 500
 VIF_THRESHOLD = 10.0
 
@@ -324,8 +327,9 @@ class PLSModel:
 
 
 class RidgeModel:
-    """StandardScaler → RidgeCV. Records selected alpha."""
-    def __init__(self, alphas=(0.01, 0.1, 1.0, 10.0, 100.0)):
+    """StandardScaler → RidgeCV with extended alpha grid (covers strong shrinkage
+    up to alpha=10000). Records selected alpha."""
+    def __init__(self, alphas=(0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0)):
         self.alphas = list(alphas)
         self.scaler = None
         self.ridge = None
@@ -349,11 +353,83 @@ class RidgeModel:
         return self.ridge.predict(X_z)
 
 
+class LassoModel:
+    """StandardScaler → LassoCV. L1 sparsity — drops features whose coefs go
+    to zero. Records selected alpha + non-zero coefficients."""
+    def __init__(self, alphas=(0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0)):
+        from sklearn.linear_model import LassoCV
+        self._LassoCV = LassoCV
+        self.alphas = list(alphas)
+        self.scaler = None
+        self.lasso = None
+        self.alpha_ = None
+        self.feature_cols: list[str] = []
+        self.nonzero_features: list[str] = []
+
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series) -> "LassoModel":
+        n = len(y_train)
+        cv = max(2, min(5, n))
+        self.scaler = StandardScaler()
+        X_z = self.scaler.fit_transform(X_train)
+        self.lasso = self._LassoCV(alphas=self.alphas, cv=cv,
+                                    max_iter=20000, random_state=RANDOM_SEED)
+        self.lasso.fit(X_z, y_train.values)
+        self.alpha_ = float(self.lasso.alpha_)
+        self.feature_cols = list(X_train.columns)
+        self.nonzero_features = [c for c, coef in zip(self.feature_cols, self.lasso.coef_)
+                                  if abs(coef) > 1e-9]
+        return self
+
+    def predict(self, X_test: pd.DataFrame) -> np.ndarray:
+        X = X_test[self.feature_cols]
+        X_z = self.scaler.transform(X)
+        return self.lasso.predict(X_z)
+
+
+class OLS1Feat:
+    """Single-feature OLS — picks the feature with the highest |Pearson r|
+    against the target on the training set. Refit per fold; the chosen
+    feature can change as more data accrues. Maximum protection against
+    small-n overfitting (only 2 parameters: intercept + 1 slope)."""
+    def __init__(self):
+        self.best_feature: str | None = None
+        self.fit_result = None
+        self.train_corr: float | None = None
+
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series) -> "OLS1Feat":
+        from scipy.stats import pearsonr
+        best_r2, best_col = -1.0, None
+        for c in X_train.columns:
+            valid = X_train[c].notna() & y_train.notna()
+            if valid.sum() < 5:
+                continue
+            r, _ = pearsonr(X_train.loc[valid, c], y_train.loc[valid])
+            if pd.isna(r):
+                continue
+            if r * r > best_r2:
+                best_r2, best_col = r * r, c
+        if best_col is None:
+            best_col = X_train.columns[0]
+        self.best_feature = best_col
+        self.train_corr = float(np.sign(
+            X_train[best_col].dropna().corr(y_train.dropna())) * np.sqrt(best_r2))
+        self.fit_result = sm.OLS(
+            y_train.values, sm.add_constant(X_train[[best_col]], has_constant="add")
+        ).fit()
+        return self
+
+    def predict(self, X_test: pd.DataFrame) -> np.ndarray:
+        X = X_test[[self.best_feature]]
+        return self.fit_result.predict(sm.add_constant(X, has_constant="add")).values
+
+
 MODEL_CLASSES: dict[str, type] = {
     "ols_drop": OLSDrop,
-    "pca": PCAModel,
-    "pls": PLSModel,
-    "ridge": RidgeModel,
+    "pca":      PCAModel,
+    "pls":      PLSModel,
+    "ridge":    RidgeModel,
+    "lasso":    LassoModel,
+    "ols_1feat": OLS1Feat,
 }
 
 
@@ -488,7 +564,11 @@ def plot_top_variant(df: pd.DataFrame, top_features: list[str], top_target: str,
 
     pt, lo, hi = q1_pred["point"], q1_pred["ci_lo"], q1_pred["ci_hi"]
     if pd.notna(pt):
-        yerr = [[pt - lo], [hi - pt]] if pd.notna(lo) and pd.notna(hi) else None
+        # Guard against degenerate CIs (lo > pt or hi < pt) — clip to non-negative
+        if pd.notna(lo) and pd.notna(hi):
+            yerr = [[max(0.0, pt - lo)], [max(0.0, hi - pt)]]
+        else:
+            yerr = None
         ax.errorbar(["Q1_2026"], [pt], yerr=yerr, fmt="*", ms=14,
                     color=COLORS["forecast"], label=f"Q1 2026 = {pt:+.2f}")
     ax.set_title(f"Top variant walk-forward: {top_name}")
@@ -618,8 +698,21 @@ def main() -> None:
     print()
 
     # === Top variant selection ===
-    top = model_only.iloc[0]
-    second = model_only.iloc[1]
+    # Walk-forward stays — no look-ahead. But variants whose walk-forward
+    # validation set is too small are ineligible to be the published top
+    # variant (RMSE rankings at n<8 are sample luck, not signal). They stay
+    # in the comparison table for diagnostic purposes.
+    eligible = model_only[model_only["n_valid"] >= MIN_VALID_FOR_TOP_PICK]
+    excluded = model_only[model_only["n_valid"] < MIN_VALID_FOR_TOP_PICK]
+    if len(excluded):
+        print(f"Excluded from top-pick (n_valid < {MIN_VALID_FOR_TOP_PICK}): "
+              f"{len(excluded)} variants")
+    if eligible.empty:
+        print("No eligible variants — falling back to model_only.iloc[0]")
+        eligible = model_only
+
+    top = eligible.iloc[0]
+    second = eligible.iloc[1] if len(eligible) > 1 else top
     top_features = feature_sets[top["features"]]
     top_target = top["target"]
     top_model_cls = MODEL_CLASSES[top["model"]]
