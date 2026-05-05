@@ -37,6 +37,9 @@ CRSP_EVENT_STUDY_PATH = DATA_RAW / "crsp_event_study.csv"
 APPSTORE_PATH = DATA_RAW / "appstore_rankings.csv"
 WEATHER_RAW_PATH = DATA_RAW / "weather_raw.csv"
 WEATHER_ANOMALY_PATH = DATA_RAW / "weather_anomaly.csv"
+REDDIT_CONSUMER_PATH = DATA_RAW / "reddit_consumer.csv"
+REDDIT_SUPPLY_PATH = DATA_RAW / "reddit_supply.csv"
+JOB_POSTINGS_PATH = DATA_RAW / "job_postings.csv"
 
 # FactSet exports — primary consensus source (Section 7g)
 # Layout: skiprows=1, columns:
@@ -182,19 +185,50 @@ IBES_SNAPSHOT_DAYS_BEFORE_QE = 60
 AR_FEATURE_COLS = [
     "prior_qtr_gov_surprise_pct",
     "prior_qtr_gov_yoy_pct",
-    "prior_qtr_take_rate",
+    "prior_qtr_orders_yoy_pct",       # orders is the cleaner volume signal vs GOV
+    "prior_qtr_take_rate_pct",
 ]
 
-# ── OLS model features (starting set, Section 11 Step 2) ──────────────────────
-OLS_BASE_FEATURES = [
+# ── OLS candidate features (Section 10, max 5 by VIF) ─────────────────────────
+# These are the columns allowed to enter the GOV regression. Anything in
+# CORROBORATING_COLS is *forbidden* — model_gov.py asserts the disjoint sets.
+MODEL_FEATURE_COLS = [
     "doordash_trends_momentum",
-    "dash_review_momentum",              # app store engagement signal (Q1 2025+)
-    "three_way_share_mean",
-    "three_way_appstore_share_mean",
-    "dash_net_sentiment_mean",           # VADER sentiment (Q1 2025+)
-    "dash_vs_uber_net_sentiment_mean",   # relative sentiment vs. UBER (Q1 2025+)
+    "dash_engagement_x_sentiment_mean",  # primary appstore signal (CLAUDE.md §9)
     "consumer_health_index",
     "prior_qtr_gov_surprise_pct",
+    "revision_momentum_pct",
+    "jolts_transport_yoy",                # optional 6th — labor supply control
+]
+
+# Corroborating signals — never enter the regression. CLAUDE.md §15 enforces
+# the split via this list (build_master_df runs an assertion).
+CORROBORATING_COLS = [
+    # Weather (already quarterly)
+    "weather_demand_boost_index",
+    "weather_demand_boost_index_popwt",
+    "extreme_weather_days_composite",
+    "cold_snap_days_composite",
+    # Reddit consumer (r/doordash)
+    "reddit_consumer_complaint_ratio",
+    "reddit_consumer_weighted_sentiment",
+    "reddit_dash_vs_uber_complaint_ratio",
+    "reddit_dash_sentiment_momentum_4wk",
+    # Reddit supply (r/doordash_drivers)
+    "reddit_supply_stress_index",
+    "reddit_driver_supply_stress_4wk",
+    "reddit_deactivation_mentions",
+    "reddit_peak_pay_mentions",
+    "reddit_signal_available",
+    # Job postings (Q1 2026 snapshot only)
+    "jobs_dash_merchant_sales_us",
+    "jobs_dash_merchant_sales_intl",
+    "jobs_dash_deliveroo_market",
+    "jobs_dash_ops_expansion",
+    "jobs_dash_dasher_supply",
+    "jobs_uber_merchant_sales_us",
+    "jobs_uber_merchant_sales_intl",
+    "jobs_dash_vs_uber_posting_ratio",
 ]
 
 # Primary model target
