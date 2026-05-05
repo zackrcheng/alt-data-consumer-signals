@@ -79,6 +79,12 @@ EXTENDED_FEATURES = CURRENT_FEATURES + EXTENDED_FEATURE_ADDS
 
 TARGET_RAW = "gov_surprise_pct"
 TARGET_STD = "gov_surprise_std"
+# Demeaned targets force features to predict the residual on top of a
+# causal base-rate estimate. Both shift(1) the divisor / subtractor so
+# only past data is used.
+TARGET_DEMEAN_4Q        = "gov_surprise_demean_4q"
+TARGET_DEMEAN_EXPANDING = "gov_surprise_demean_expanding"
+TARGETS_ALL = [TARGET_RAW, TARGET_STD, TARGET_DEMEAN_4Q, TARGET_DEMEAN_EXPANDING]
 
 MIN_TRAIN_QUARTERS = WALK_FORWARD_MIN_TRAIN_QUARTERS   # 8
 MIN_VALID_TRAIN_ROWS = 6
@@ -160,14 +166,56 @@ def compute_extended_features(master: pd.DataFrame, dash_gov: pd.DataFrame,
     return df, added
 
 
-def add_standardized_target(df: pd.DataFrame) -> pd.DataFrame:
-    """Add gov_surprise_std using causal expanding std."""
+def add_alternative_targets(df: pd.DataFrame) -> pd.DataFrame:
+    """Add the three causal alternative targets:
+       • TARGET_STD              — surprise / causal expanding std.
+       • TARGET_DEMEAN_4Q        — surprise − causal trailing-4q mean.
+       • TARGET_DEMEAN_EXPANDING — surprise − causal expanding mean.
+    All three .shift(1) the divisor/subtractor so only past data feeds in.
+    The conversion factors (std, 4q mean, expanding mean) are stored as
+    columns prefixed with `_` for use at forecast time."""
     df = df.copy()
     s = df[TARGET_RAW]
+
     expanding_std = s.expanding(min_periods=4).std().shift(1)
     df[TARGET_STD] = s / expanding_std
     df["_expanding_std_for_surprise"] = expanding_std
+
+    trail_4q_mean = s.rolling(4).mean().shift(1)
+    df[TARGET_DEMEAN_4Q] = s - trail_4q_mean
+    df["_demean_4q_baseline"] = trail_4q_mean
+
+    expanding_mean = s.expanding(min_periods=4).mean().shift(1)
+    df[TARGET_DEMEAN_EXPANDING] = s - expanding_mean
+    df["_demean_expanding_baseline"] = expanding_mean
+
     return df
+
+
+# Back-compat alias — older notebook cells imported this name
+add_standardized_target = add_alternative_targets
+
+
+def convert_target_pred_to_pp(target: str, raw_pred: float, df: pd.DataFrame,
+                                fc_idx: int) -> float:
+    """Convert a prediction in target units to surprise pp at the forecast row."""
+    if pd.isna(raw_pred):
+        return np.nan
+    if target == TARGET_RAW:
+        return float(raw_pred)
+    if target == TARGET_STD:
+        # forecast-time expanding std: std of all historical surprise through
+        # the row strictly before the forecast row.
+        hist = df.iloc[:fc_idx][TARGET_RAW].dropna()
+        std = float(hist.expanding(min_periods=4).std().iloc[-1])
+        return float(raw_pred) * std
+    if target == TARGET_DEMEAN_4Q:
+        baseline = float(df["_demean_4q_baseline"].iloc[fc_idx])
+        return float(raw_pred) + baseline
+    if target == TARGET_DEMEAN_EXPANDING:
+        baseline = float(df["_demean_expanding_baseline"].iloc[fc_idx])
+        return float(raw_pred) + baseline
+    raise ValueError(f"Unknown target: {target}")
 
 
 def impute_forecast_row_jolts(df: pd.DataFrame) -> pd.DataFrame:
@@ -486,15 +534,21 @@ def main() -> None:
         print(f"  {c:36s} {'NaN' if pd.isna(v) else f'{v:+.3f}'}")
     print()
 
-    # Forecast-time conversion factor for std target
+    # Forecast-time conversion baselines per target
+    fc_idx = df.index[df["quarter_label"] == FORECAST_QUARTER][0]
     surprise_hist = hist[TARGET_RAW].dropna()
     forecast_expanding_std = float(surprise_hist.expanding(min_periods=4).std().iloc[-1])
-    print(f"Expanding std as of Q1 2026 (for unstandardizing): {forecast_expanding_std:.3f}pp")
+    forecast_demean_4q_baseline = float(df["_demean_4q_baseline"].iloc[fc_idx])
+    forecast_demean_expanding_baseline = float(df["_demean_expanding_baseline"].iloc[fc_idx])
+    print(f"Forecast-time conversion baselines (for back-out to pp):")
+    print(f"  std target  •  expanding_std as of Q1 2026:           {forecast_expanding_std:.3f}pp")
+    print(f"  demean_4q   •  trailing-4q mean of historical surprise: {forecast_demean_4q_baseline:.3f}pp")
+    print(f"  demean_exp  •  expanding mean of historical surprise:   {forecast_demean_expanding_baseline:.3f}pp")
     print()
 
-    # Run all variants
+    # Run all variants — 2 feature sets × 4 targets × 4 architectures = 32
     feature_sets = {"current": CURRENT_FEATURES, "extended": EXTENDED_FEATURES}
-    targets = [TARGET_RAW, TARGET_STD]
+    targets = TARGETS_ALL
 
     rows = []
     for fset_name, fset in feature_sets.items():
@@ -505,15 +559,9 @@ def main() -> None:
                     wf = run_walk_forward(df, fset, target, model_cls)
                     metrics = evaluate(wf)
                     fcst = predict_q1_2026(df, fset, target, model_cls)
-                    if target == TARGET_STD:
-                        pred_pct = (fcst["point"] * forecast_expanding_std
-                                    if pd.notna(fcst["point"]) else np.nan)
-                        ci_lo_pct = (fcst["ci_lo"] * forecast_expanding_std
-                                     if pd.notna(fcst["ci_lo"]) else np.nan)
-                        ci_hi_pct = (fcst["ci_hi"] * forecast_expanding_std
-                                     if pd.notna(fcst["ci_hi"]) else np.nan)
-                    else:
-                        pred_pct, ci_lo_pct, ci_hi_pct = fcst["point"], fcst["ci_lo"], fcst["ci_hi"]
+                    pred_pct = convert_target_pred_to_pp(target, fcst["point"], df, fc_idx)
+                    ci_lo_pct = convert_target_pred_to_pp(target, fcst["ci_lo"], df, fc_idx)
+                    ci_hi_pct = convert_target_pred_to_pp(target, fcst["ci_hi"], df, fc_idx)
                     rows.append({
                         "variant_name": variant, "target": target,
                         "features": fset_name, "model": model_name,
@@ -603,17 +651,13 @@ def main() -> None:
         if pd.isna(p):
             print(f"  q={q:.2f}  NaN")
         else:
-            disp = (p * forecast_expanding_std) if top_target == TARGET_STD else p
-            unit = "pp" if top_target == TARGET_RAW else f"σ → {disp:+.2f}pp"
-            print(f"  q={q:.2f}  raw = {p:+.3f}  ({unit})")
+            disp = convert_target_pred_to_pp(top_target, p, df, fc_idx)
+            print(f"  q={q:.2f}  raw = {p:+.3f}  →  {disp:+.2f}pp")
     print()
 
-    # Convert quantile preds + CI to pp if needed
-    if top_target == TARGET_STD:
-        q_pp = {q: (p * forecast_expanding_std if pd.notna(p) else np.nan)
-                for q, p in quant_preds.items()}
-    else:
-        q_pp = quant_preds
+    # Convert quantile preds + CI to pp using the per-target rule
+    q_pp = {q: convert_target_pred_to_pp(top_target, p, df, fc_idx)
+            for q, p in quant_preds.items()}
 
     # === Pre-registration ===
     pred_pct = float(top["q1_2026_pred_pct"])
@@ -653,14 +697,26 @@ def main() -> None:
     }])
     prereg.to_csv(OUTPUTS_TABLES / "q1_2026_preregistered.csv", index=False)
 
-    # Plot
+    # Plot — pass CI in the SAME units as the target the model was trained on,
+    # so it overlays the walk-forward predictions cleanly.
+    if top_target == TARGET_RAW:
+        plot_ci_lo_raw, plot_ci_hi_raw = ci_lo, ci_hi
+    elif top_target == TARGET_STD:
+        plot_ci_lo_raw = ci_lo / forecast_expanding_std if pd.notna(ci_lo) else np.nan
+        plot_ci_hi_raw = ci_hi / forecast_expanding_std if pd.notna(ci_hi) else np.nan
+    elif top_target == TARGET_DEMEAN_4Q:
+        b = forecast_demean_4q_baseline
+        plot_ci_lo_raw = ci_lo - b if pd.notna(ci_lo) else np.nan
+        plot_ci_hi_raw = ci_hi - b if pd.notna(ci_hi) else np.nan
+    else:  # TARGET_DEMEAN_EXPANDING
+        b = forecast_demean_expanding_baseline
+        plot_ci_lo_raw = ci_lo - b if pd.notna(ci_lo) else np.nan
+        plot_ci_hi_raw = ci_hi - b if pd.notna(ci_hi) else np.nan
+
     plot_top_variant(df, top_features, top_target, top_model_cls,
                      top["variant_name"],
-                     {"point": top["q1_2026_pred_raw"], "ci_lo": ci_lo, "ci_hi": ci_hi}
-                     if top_target == TARGET_RAW else
                      {"point": top["q1_2026_pred_raw"],
-                      "ci_lo": ci_lo / forecast_expanding_std if pd.notna(ci_lo) else np.nan,
-                      "ci_hi": ci_hi / forecast_expanding_std if pd.notna(ci_hi) else np.nan},
+                      "ci_lo": plot_ci_lo_raw, "ci_hi": plot_ci_hi_raw},
                      OUTPUTS_FIGURES / "walk_forward.png")
 
     print("=" * 72)
