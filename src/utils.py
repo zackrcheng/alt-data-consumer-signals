@@ -149,14 +149,82 @@ def monthly_to_quarterly(
     return pd.DataFrame(records)
 
 
+_FACTSET_MONTH_TO_QUARTER = {"Mar": "Q1", "Jun": "Q2", "Sep": "Q3", "Dec": "Q4"}
+
+
+def parse_factset_period(period: str) -> str | None:
+    """
+    Convert FactSet 'Period' values to quarter labels.
+        "Mar '26E"  -> "Q1_2026"   (E suffix = forward estimate, no actual)
+        "Dec '25"   -> "Q4_2025"
+    Returns None on unparseable input.
+    """
+    if not isinstance(period, str):
+        return None
+    s = period.strip().rstrip("E").strip()
+    parts = s.replace("'", "").split()
+    if len(parts) != 2:
+        return None
+    month, yy = parts
+    q = _FACTSET_MONTH_TO_QUARTER.get(month)
+    if q is None or not yy.isdigit():
+        return None
+    year = 2000 + int(yy)   # all data is post-2020
+    return f"{q}_{year}"
+
+
+def load_factset_table(path) -> pd.DataFrame:
+    """
+    Load a FactSet quarterly export (skiprows=1) and standardize columns.
+
+    Returns DataFrame sorted ascending by quarter_end_date with columns:
+        quarter_label, quarter_end_date, event_date,
+        actual, consensus_mean, surprise_pct, num_est,
+        low, high, guid_low, guid_high
+    Non-numeric '-' placeholders are coerced to NaN.
+    """
+    from src.config import QUARTER_END_DATES
+
+    df = pd.read_excel(path, skiprows=1)
+
+    df["quarter_label"] = df["Period"].apply(parse_factset_period)
+    df = df[df["quarter_label"].notna()].copy()
+    df["quarter_end_date"] = pd.to_datetime(df["quarter_label"].map(QUARTER_END_DATES))
+
+    numeric_cols = ["After Event", "Mean", "Surp (%)", "Num of Est",
+                    "Low", "High", "Guid (Low)", "Guid (High)"]
+    for c in numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df["Event Date"] = pd.to_datetime(
+        df["Event Date"], format="%d %b '%y", errors="coerce"
+    )
+
+    rename = {
+        "Event Date": "event_date",
+        "After Event": "actual",
+        "Mean": "consensus_mean",
+        "Surp (%)": "surprise_pct",
+        "Num of Est": "num_est",
+        "Low": "low",
+        "High": "high",
+        "Guid (Low)": "guid_low",
+        "Guid (High)": "guid_high",
+    }
+    out_cols = ["quarter_label", "quarter_end_date"] + list(rename.values())
+    return (df.rename(columns=rename)[out_cols]
+              .sort_values("quarter_end_date")
+              .reset_index(drop=True))
+
+
 def compute_yoy(series: pd.Series) -> pd.Series:
-    """Compute year-over-year % growth (4-quarter lag)."""
-    return series.pct_change(4) * 100
+    """YoY % growth (4-quarter lag). NaN-preserving — no forward fill."""
+    return series.pct_change(4, fill_method=None) * 100
 
 
 def compute_qoq(series: pd.Series) -> pd.Series:
-    """Compute quarter-over-quarter % growth."""
-    return series.pct_change(1) * 100
+    """QoQ % growth. NaN-preserving — no forward fill."""
+    return series.pct_change(1, fill_method=None) * 100
 
 
 def print_pull_summary(label: str, df: pd.DataFrame, date_col: str = None) -> None:

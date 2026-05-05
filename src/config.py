@@ -34,6 +34,23 @@ FRED_MACRO_PATH = DATA_RAW / "fred_macro.csv"
 IBES_CONSENSUS_PATH = DATA_RAW / "ibes_consensus.csv"
 COMPUSTAT_PATH = DATA_RAW / "compustat_fundamentals.csv"
 CRSP_EVENT_STUDY_PATH = DATA_RAW / "crsp_event_study.csv"
+APPSTORE_PATH = DATA_RAW / "appstore_rankings.csv"
+WEATHER_RAW_PATH = DATA_RAW / "weather_raw.csv"
+WEATHER_ANOMALY_PATH = DATA_RAW / "weather_anomaly.csv"
+
+# FactSet exports — primary consensus source (Section 7g)
+# Layout: skiprows=1, columns:
+#   Period | Event Date | After Event | Mean | Surp (%) | Num of Est | Low | High | Guid (Low) | Guid (High) | Price Imp (%)
+# Dollar columns (GOV, contribution profit, GB) are millions USD.
+FACTSET_DASH_GOV_PATH          = DATA_RAW / "factset_dash_gov.xlsx"             # millions USD (US Marketplace GOV)
+FACTSET_DASH_ORDERS_PATH       = DATA_RAW / "factset_dash_orders.xlsx"          # thousands of orders → divide by 1000 for millions
+FACTSET_DASH_AOV_PATH          = DATA_RAW / "factset_dash_aov.xlsx"             # USD per order
+FACTSET_DASH_TAKERATE_PATH     = DATA_RAW / "factset_dash_takerate.xlsx"        # percent
+FACTSET_DASH_CONTRIBUTION_PATH = DATA_RAW / "factset_dash_contribution.xlsx"    # millions USD
+FACTSET_UBER_GB_PATH                  = DATA_RAW / "factset_uber_gb.xlsx"                  # TOTAL GB (Mobility+Delivery+Freight), millions USD — cross-check only
+FACTSET_UBER_EATS_TAKERATE_PATH       = DATA_RAW / "factset_uber_eats_takerate.xlsx"       # percent
+FACTSET_UBER_CONTRIBUTION_MARGIN_PATH = DATA_RAW / "factset_uber_contribution_margin.xlsx" # percent
+FACTSET_UBER_MAPC_PATH                = DATA_RAW / "factset_uber_mapc.xlsx"                # millions
 
 # ── Ticker universe ────────────────────────────────────────────────────────────
 # MODEL INDEPENDENCE RULES — strictly enforced (see CLAUDE.md §7):
@@ -68,8 +85,8 @@ Q1_2026_EARNINGS_DATE = "2026-05-06"
 
 # ── Google Trends keywords (US geo only, Section 8a) ─────────────────────────
 TRENDS_KEYWORDS = {
-    "group1": ["DoorDash", "Uber Eats", "Instacart", "food delivery"],
-    "group2": ["DashPass", "Uber One", "grocery delivery"],
+    "group1": ["DoorDash", "Uber Eats", "Instacart", "Grubhub", "food delivery"],
+    "group2": ["DashPass", "Uber One", "Grubhub+", "grocery delivery"],
     "group3": ["DoorDash app", "order food online", "restaurant delivery"],
 }
 
@@ -79,7 +96,9 @@ TRENDS_FEATURE_COLS = [
     "doordash_trends_momentum",       # QoQ acceleration in DoorDash index
     "doordash_vs_ubereats_mean",      # DoorDash / UberEats ratio
     "doordash_vs_instacart_mean",     # DoorDash / Instacart ratio
+    "doordash_vs_grubhub_mean",       # DoorDash / Grubhub ratio
     "three_way_share_mean",           # DoorDash / (DoorDash + UberEats + Instacart)
+    "four_way_share_mean",            # DoorDash / (DoorDash + UberEats + Instacart + Grubhub)
     "dashpass_momentum",              # 4-week rolling mean of DashPass
     "trends_seasonal_adj",            # deseasonalized DoorDash index (fit on 2018+)
 ]
@@ -87,6 +106,37 @@ TRENDS_FEATURE_COLS = [
 # Aggregation window: 8 weeks ending 2 weeks before quarter-end (no look-ahead)
 TRENDS_WINDOW_WEEKS = 8
 TRENDS_LAG_WEEKS = 2
+
+# ── App store identifiers (Section 8f) ────────────────────────────────────────
+# NOT foot traffic — DASH is a delivery app, wrong causal chain (see CLAUDE.md §8f)
+# Review velocity = WoW change in cumulative review count = engagement/download proxy
+APPS = {
+    "DASH":      {"google": "com.dd.doordash",      "ios": 719972451},
+    "UBER_EATS": {"google": "com.ubercab.eats",     "ios": 1058959277},
+    "INSTACART": {"google": "com.instacart.client", "ios": 545599256},
+    "GRUBHUB":   {"google": "com.grubhub.android",  "ios": 302920553},
+    "GOPUFF":    {"google": "com.main.gopuff",      "ios": 722804810},
+}
+
+APPSTORE_FEATURE_COLS = [
+    # Volume / engagement (8-week window mean, 2-week lag)
+    "dash_review_velocity_mean",        # mean weekly GP review count (download proxy)
+    "dash_review_momentum",             # QoQ acceleration in weekly review count
+    # Relative velocity vs. peers
+    "dash_vs_uber_review_ratio_mean",
+    "dash_vs_grubhub_review_ratio_mean",
+    # Volume share
+    "three_way_appstore_share_mean",    # DASH / (DASH + UBER + CART)
+    "five_way_appstore_share_mean",
+    # Sentiment (VADER + star rating)
+    "dash_net_sentiment_mean",          # positive_ratio - complaint_ratio
+    "dash_complaint_ratio_mean",        # fraction is_complaint reviews
+    "dash_weighted_sentiment_mean",     # thumbsUpCount-weighted vader compound
+    # Relative sentiment vs. UBER
+    "dash_vs_uber_net_sentiment_mean",  # DASH - UBER net_sentiment delta
+    # iTunes snapshot (current week only — NaN for historical quarters)
+    "dash_ios_rank",                    # Food & Drink rank (lower = better)
+]
 
 # ── FRED macro series (Section 8b) ────────────────────────────────────────────
 FRED_SERIES = {
@@ -138,7 +188,11 @@ AR_FEATURE_COLS = [
 # ── OLS model features (starting set, Section 11 Step 2) ──────────────────────
 OLS_BASE_FEATURES = [
     "doordash_trends_momentum",
+    "dash_review_momentum",              # app store engagement signal (Q1 2025+)
     "three_way_share_mean",
+    "three_way_appstore_share_mean",
+    "dash_net_sentiment_mean",           # VADER sentiment (Q1 2025+)
+    "dash_vs_uber_net_sentiment_mean",   # relative sentiment vs. UBER (Q1 2025+)
     "consumer_health_index",
     "prior_qtr_gov_surprise_pct",
 ]
@@ -165,6 +219,8 @@ MASTER_DF_COLS = [
     "ebitda_margin_pct",        # EBITDA / revenue * 100
     # Trends features
     *TRENDS_FEATURE_COLS,
+    # App store features (Section 8f; available Q1 2025 onward from GP data)
+    *APPSTORE_FEATURE_COLS,
     # Macro features
     *MACRO_FEATURE_COLS,
     # IBES features
@@ -174,32 +230,63 @@ MASTER_DF_COLS = [
 ]
 
 # ── DASH US Marketplace GOV actuals — hardcoded from IR filings (Section 9) ───
-# IMPORTANT: Every figure must be verified against ir.doordash.com before use.
-# Units: billions USD. Scope: US Marketplace GOV only (excludes international).
-# Q1 2026 intentionally None — this is the out-of-sample forecast target.
+# Verified against IR filings. US Marketplace GOV, millions USD.
 GOV_ACTUALS = {
-    "Q4_2020": 7.20,   # VERIFY against 10-K
-    "Q1_2021": 8.10,   # VERIFY against 10-Q
-    "Q2_2021": 10.00,  # VERIFY
-    "Q3_2021": 10.40,  # VERIFY
-    "Q4_2021": 11.90,  # VERIFY
-    "Q1_2022": 12.40,  # VERIFY
-    "Q2_2022": 13.10,  # VERIFY
-    "Q3_2022": 13.70,  # VERIFY
-    "Q4_2022": 14.50,  # VERIFY
-    "Q1_2023": 15.10,  # VERIFY
-    "Q2_2023": 16.50,  # VERIFY
-    "Q3_2023": 17.00,  # VERIFY
-    "Q4_2023": 17.60,  # VERIFY
-    "Q1_2024": 18.50,  # VERIFY
-    "Q2_2024": 19.70,  # VERIFY
-    "Q3_2024": 20.00,  # VERIFY
-    "Q4_2024": 21.30,  # VERIFY
-    "Q1_2025": 21.30,  # VERIFY
-    "Q2_2025": 22.90,  # VERIFY
-    "Q3_2025": 24.30,  # VERIFY
-    "Q4_2025": 25.00,  # VERIFY
-    "Q1_2026": None,   # TARGET — earnings May 6 2026
+    'Q4_2020': 8_179,   # https://s22.q4cdn.com/280253921/files/doc_financials/2021/q4/DASH-Q4-2021-Shareholder-Letter.pdf
+    'Q1_2021': 9_913,   # https://s22.q4cdn.com/280253921/files/doc_financials/2021/q4/DASH-Q4-2021-Shareholder-Letter.pdf
+    'Q2_2021': 10_456,  # https://s22.q4cdn.com/280253921/files/doc_financials/2021/q4/DASH-Q4-2021-Shareholder-Letter.pdf
+    'Q3_2021': 10_416,  # https://s22.q4cdn.com/280253921/files/doc_financials/2021/q4/DASH-Q4-2021-Shareholder-Letter.pdf
+    'Q4_2021': 11_159,  # https://s22.q4cdn.com/280253921/files/doc_financials/2022/q4/DASH_Q4-2022-Shareholder-Letter_FINAL-(1).pdf
+    'Q1_2022': 12_353,  # https://s22.q4cdn.com/280253921/files/doc_financials/2022/q4/DASH_Q4-2022-Shareholder-Letter_FINAL-(1).pdf
+    'Q2_2022': 13_081,  # https://s22.q4cdn.com/280253921/files/doc_financials/2023/q2/DASH-Q2-23_Earnings-Press-Release.pdf
+    'Q3_2022': 13_534,  # https://s22.q4cdn.com/280253921/files/doc_financials/2023/q2/DASH-Q2-23_Earnings-Press-Release.pdf
+    'Q4_2022': 14_446,  # https://s22.q4cdn.com/280253921/files/doc_financials/2023/q2/DASH-Q2-23_Earnings-Press-Release.pdf
+    'Q1_2023': 15_913,  # https://s22.q4cdn.com/280253921/files/doc_financials/2023/q2/DASH-Q2-23_Earnings-Press-Release.pdf
+    'Q2_2023': 16_468,  # https://s22.q4cdn.com/280253921/files/doc_financials/2023/q2/DASH-Q2-23_Earnings-Press-Release.pdf
+    'Q3_2023': 16_751,  # https://s22.q4cdn.com/280253921/files/doc_financials/2024/q3/DASH-Q3-2024-Ex-99-1-Press-release.pdf
+    'Q4_2023': 17_639,  # https://s22.q4cdn.com/280253921/files/doc_financials/2024/q3/DASH-Q3-2024-Ex-99-1-Press-release.pdf
+    'Q1_2024': 19_239,  # https://s22.q4cdn.com/280253921/files/doc_financials/2024/q3/DASH-Q3-2024-Ex-99-1-Press-release.pdf
+    'Q2_2024': 19_711,  # https://s22.q4cdn.com/280253921/files/doc_financials/2024/q3/DASH-Q3-2024-Ex-99-1-Press-release.pdf
+    'Q3_2024': 20_002,  # https://s22.q4cdn.com/280253921/files/doc_financials/2024/q3/DASH-Q3-2024-Ex-99-1-Press-release.pdf
+    'Q4_2024': 21_279,  # https://s22.q4cdn.com/280253921/files/doc_financials/2025/q4/Q4-2025-Earnings-Press-Release.pdf
+    'Q1_2025': 23_076,  # https://s22.q4cdn.com/280253921/files/doc_financials/2025/q4/Q4-2025-Earnings-Press-Release.pdf
+    'Q2_2025': 24_244,  # https://s22.q4cdn.com/280253921/files/doc_financials/2025/q4/Q4-2025-Earnings-Press-Release.pdf
+    'Q3_2025': 25_015,  # https://s22.q4cdn.com/280253921/files/doc_financials/2025/q4/Q4-2025-Earnings-Press-Release.pdf
+    'Q4_2025': 29_683,  # https://s22.q4cdn.com/280253921/files/doc_financials/2025/q4/Q4-2025-Earnings-Press-Release.pdf
+    'Q1_2026': None,    # TARGET — earnings May 6 2026
+}
+
+# ── UBER Delivery Gross Bookings actuals — IR-verified (Section 8) ────────────
+# UBER's delivery-segment-only GB. factset_uber_gb.xlsx is TOTAL GB
+# (Mobility + Delivery + Freight) so cannot be used for the delivery model.
+# Use these for the UBER cross-sectional model; FactSet total GB is for
+# consensus/guidance cross-check only.
+UBER_GB_DELIVERY_ACTUALS = {
+    'Q1_2020':  4_683,
+    'Q2_2020':  6_961,
+    'Q3_2020':  8_550,
+    'Q4_2020': 10_050,
+    'Q1_2021': 12_461,
+    'Q2_2021': 12_912,
+    'Q3_2021': 12_828,
+    'Q4_2021': 13_444,
+    'Q1_2022': 13_903,
+    'Q2_2022': 13_876,
+    'Q3_2022': 13_684,
+    'Q4_2022': 14_315,
+    'Q1_2023': 15_026,
+    'Q2_2023': 15_595,
+    'Q3_2023': 16_094,
+    'Q4_2023': 17_011,
+    'Q1_2024': 17_699,
+    'Q2_2024': 18_126,
+    'Q3_2024': 18_663,
+    'Q4_2024': 20_126,
+    'Q1_2025': 20_377,
+    'Q2_2025': 21_734,
+    'Q3_2025': 23_322,
+    'Q4_2025': 25_431,
+    'Q1_2026': None,   # forecast target
 }
 
 # Quarter-end dates for alignment with other time series
@@ -229,18 +316,29 @@ QUARTER_END_DATES = {
 }
 
 # ── DASH earnings event dates (Section 13) ────────────────────────────────────
-# Verify all dates before running event study.
+# Verified all dates before running event study.
 EARNINGS_DATES = {
     "Q4_2025": "2026-02-18",
     "Q3_2025": "2025-11-05",
     "Q2_2025": "2025-08-06",
     "Q1_2025": "2025-05-06",
-    "Q4_2024": "2025-02-12",
-    "Q3_2024": "2024-11-06",
-    "Q2_2024": "2024-08-07",
+    "Q4_2024": "2025-02-11",
+    "Q3_2024": "2024-10-30",
+    "Q2_2024": "2024-08-01",
     "Q1_2024": "2024-05-01",
-    "Q4_2023": "2024-02-14",
+    "Q4_2023": "2024-02-15",
     "Q3_2023": "2023-11-01",
+    "Q2_2023": "2023-08-02",
+    "Q1_2023": "2023-05-04",
+    "Q4_2022": "2023-02-16",
+    "Q3_2022": "2022-11-03",
+    "Q2_2022": "2022-08-04",
+    "Q1_2022": "2022-05-05",
+    "Q4_2021": "2022-02-16",
+    "Q3_2021": "2021-11-09",
+    "Q2_2021": "2021-08-12",
+    "Q1_2021": "2021-05-13",
+    "Q4_2020": "2021-02-25",
 }
 
 # Event study windows (trading days relative to earnings date)
