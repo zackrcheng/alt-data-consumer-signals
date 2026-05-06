@@ -1,0 +1,201 @@
+"""
+pull_crsp.py — daily stock returns + market index from WRDS CRSP.
+
+Outputs data/raw/crsp_event_study.csv with columns:
+  date, ticker, permno, ret_stock, ret_market_vwretd, abnormal_return,
+  prc, vol
+
+ret_stock         daily total return from crsp.dsf
+ret_market_vwretd value-weighted CRSP market return from crsp.dsi
+abnormal_return   ret_stock − ret_market_vwretd (causal definition; no
+                   regression-based abnormal needed for short event windows)
+
+Used by src/event_study.py to compute CAR[-1, +2] and CAR[0, +1] around
+DASH/UBER/CART earnings dates and fit β3 (CAR ~ surprise).
+
+Tickers pulled: CORE_MODEL (DASH, UBER, CART). DASH IPO 2020-12-09;
+CART IPO 2023-09-19; UBER IPO 2019-05-10. Date range 2018-01-01 onward
+(captures DASH from IPO and gives full UBER history).
+
+Mirrors connection logic from pull_wrds_compustat.py / pull_wrds_ibes.py
+(.pgpass first, interactive fallback).
+"""
+
+import os
+import sys
+import pandas as pd
+import numpy as np
+from dotenv import load_dotenv
+
+load_dotenv()
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.config import CRSP_EVENT_STUDY_PATH, CORE_MODEL
+from src.utils import print_pull_summary
+
+np.random.seed(42)
+
+
+# ── WRDS connection (copied pattern from pull_wrds_compustat.py) ────────────
+
+def _read_pgpass_password(hostname: str, username: str) -> str | None:
+    pgpass = os.path.expanduser("~/.pgpass")
+    if not os.path.exists(pgpass):
+        return None
+    with open(pgpass) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(":")
+            if len(parts) < 5:
+                continue
+            h, _port, _db, u, pw = parts[0], parts[1], parts[2], parts[3], ":".join(parts[4:])
+            if (h in (hostname, "*")) and (u in (username, "*")):
+                return pw
+    return None
+
+
+def _get_wrds_connection():
+    try:
+        import wrds
+    except ImportError:
+        raise ImportError("wrds not installed. Run: pip install wrds")
+    username = os.getenv("WRDS_USERNAME")
+    if not username:
+        raise EnvironmentError(
+            "WRDS_USERNAME not set. Copy .env.template to .env and add WRDS_USERNAME.")
+    password = _read_pgpass_password("wrds-pgdata.wharton.upenn.edu", username)
+    if password:
+        try:
+            db = __import__("wrds").Connection(wrds_username=username,
+                                                 wrds_password=password)
+            return db
+        except Exception as e:
+            print(f"  pgpass credentials failed ({e}). Falling back to interactive login...")
+    return __import__("wrds").Connection(wrds_username=username)
+
+
+# ── Data pull ────────────────────────────────────────────────────────────────
+
+def _lookup_permnos(db, tickers: list[str]) -> pd.DataFrame:
+    """Resolve tickers → CRSP permnos via crsp.stocknames.
+
+    A ticker may map to multiple permnos over time (renames, mergers).
+    For DASH/UBER/CART (recent IPOs) there's a single permno per ticker.
+    """
+    ticker_sql = ", ".join(f"'{t}'" for t in tickers)
+    query = f"""
+        SELECT DISTINCT permno, ticker, comnam, namedt, nameenddt
+        FROM crsp.stocknames
+        WHERE ticker IN ({ticker_sql})
+          AND nameenddt >= '2018-01-01'
+        ORDER BY ticker, namedt
+    """
+    df = db.raw_sql(query)
+    print(f"  crsp.stocknames matches:")
+    for _, row in df.iterrows():
+        print(f"    {row['ticker']:6s}  permno={row['permno']:8.0f}  "
+              f"{row['comnam']:30s}  {row['namedt']} → {row['nameenddt']}")
+    return df
+
+
+def _pull_daily_returns(db, permnos: list[float], start: str = "2018-01-01"
+                          ) -> pd.DataFrame:
+    """Pull daily total returns from crsp.dsf for the given permnos."""
+    permno_sql = ", ".join(str(int(p)) for p in permnos)
+    query = f"""
+        SELECT date, permno, ret, prc, vol
+        FROM crsp.dsf
+        WHERE permno IN ({permno_sql})
+          AND date >= '{start}'
+        ORDER BY permno, date
+    """
+    df = db.raw_sql(query)
+    df["date"] = pd.to_datetime(df["date"])
+    print(f"  crsp.dsf returned {len(df):,} stock-day rows")
+    return df
+
+
+def _pull_market_index(db, start: str = "2018-01-01") -> pd.DataFrame:
+    """Pull daily value-weighted market return from crsp.dsi."""
+    query = f"""
+        SELECT date, vwretd, ewretd, sprtrn
+        FROM crsp.dsi
+        WHERE date >= '{start}'
+        ORDER BY date
+    """
+    df = db.raw_sql(query)
+    df["date"] = pd.to_datetime(df["date"])
+    print(f"  crsp.dsi returned {len(df):,} market-day rows")
+    return df
+
+
+def pull_crsp(tickers: list[str] | None = None, start: str = "2018-01-01"
+                ) -> pd.DataFrame:
+    """Pull daily CRSP stock + market data, return one merged DataFrame."""
+    if tickers is None:
+        tickers = list(CORE_MODEL)
+
+    db = _get_wrds_connection()
+    try:
+        names = _lookup_permnos(db, tickers)
+        if names.empty:
+            print("  No permnos found — check ticker spelling.")
+            return pd.DataFrame()
+
+        # Keep one permno per ticker (the most recent if ticker was reused)
+        keep = (names.sort_values(["ticker", "namedt"], ascending=[True, False])
+                       .drop_duplicates(subset=["ticker"], keep="first"))
+        ticker_to_permno = dict(zip(keep["ticker"], keep["permno"]))
+        print(f"\n  Using permnos: {ticker_to_permno}")
+
+        dsf = _pull_daily_returns(db, list(ticker_to_permno.values()), start)
+        dsi = _pull_market_index(db, start)
+    finally:
+        db.close()
+
+    if dsf.empty or dsi.empty:
+        print("  Empty CRSP pull — aborting.")
+        return pd.DataFrame()
+
+    # Merge ticker symbol back onto dsf via permno
+    permno_to_ticker = {v: k for k, v in ticker_to_permno.items()}
+    dsf["ticker"] = dsf["permno"].map(permno_to_ticker)
+
+    # Join market return; compute abnormal return
+    out = dsf.merge(dsi[["date", "vwretd"]], on="date", how="left")
+    out = out.rename(columns={"ret": "ret_stock", "vwretd": "ret_market_vwretd"})
+    out["abnormal_return"] = out["ret_stock"] - out["ret_market_vwretd"]
+
+    out = out[["date", "ticker", "permno", "ret_stock", "ret_market_vwretd",
+                "abnormal_return", "prc", "vol"]].sort_values(
+                ["ticker", "date"]).reset_index(drop=True)
+
+    # ── Per-ticker summary ────────────────────────────────────────────────
+    print()
+    for tk in tickers:
+        sub = out[out["ticker"] == tk]
+        if sub.empty:
+            print(f"  WARNING: no CRSP rows for {tk}")
+            continue
+        print(f"  {tk:6s}  permno={int(sub['permno'].iloc[0]):8d}  "
+              f"{sub['date'].min().date()} → {sub['date'].max().date()}  "
+              f"({len(sub):,} trading days)")
+
+    print_pull_summary("CRSP daily returns (all tickers)", out, "date")
+    return out
+
+
+def save_crsp(tickers: list[str] | None = None, start: str = "2018-01-01") -> None:
+    df = pull_crsp(tickers=tickers, start=start)
+    if df.empty:
+        print("Nothing to save — DataFrame is empty.")
+        return
+    CRSP_EVENT_STUDY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(CRSP_EVENT_STUDY_PATH, index=False)
+    print(f"\nSaved {len(df):,} rows → {CRSP_EVENT_STUDY_PATH}")
+
+
+if __name__ == "__main__":
+    save_crsp()
