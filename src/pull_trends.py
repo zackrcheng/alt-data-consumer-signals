@@ -208,13 +208,13 @@ def pull_all_trends(start: str = TRENDS_HISTORY_START) -> pd.DataFrame:
     Pull all three keyword groups and compute all derived share metrics.
     Returns weekly DataFrame with date column and all derived features.
     """
-    print("\nPulling Google Trends group 1 (DoorDash, Uber Eats, Instacart, food delivery)…")
+    print(f"\nPulling Google Trends group 1 ({', '.join(TRENDS_KEYWORDS['group1'])})…")
     g1 = pull_trends_group(TRENDS_KEYWORDS["group1"], start=start)
 
-    print("\nPulling Google Trends group 2 (DashPass, Uber One, grocery delivery)…")
+    print(f"\nPulling Google Trends group 2 ({', '.join(TRENDS_KEYWORDS['group2'])})…")
     g2 = pull_trends_group(TRENDS_KEYWORDS["group2"], start=start)
 
-    print("\nPulling Google Trends group 3 (DoorDash app, order food online, restaurant delivery)…")
+    print(f"\nPulling Google Trends group 3 ({', '.join(TRENDS_KEYWORDS['group3'])})…")
     g3 = pull_trends_group(TRENDS_KEYWORDS["group3"], start=start)
 
     # Combine all groups on the weekly date index
@@ -233,6 +233,7 @@ def pull_all_trends(start: str = TRENDS_HISTORY_START) -> pd.DataFrame:
     dd = "DoorDash"
     ue = "Uber Eats"
     ic = "Instacart"
+    gh = "Grubhub"
 
     if dd in combined.columns and ue in combined.columns:
         combined["doordash_vs_ubereats"] = (
@@ -242,14 +243,23 @@ def pull_all_trends(start: str = TRENDS_HISTORY_START) -> pd.DataFrame:
         combined["doordash_vs_instacart"] = (
             combined[dd] / combined[ic].replace(0, np.nan)
         )
+    if dd in combined.columns and gh in combined.columns:
+        combined["doordash_vs_grubhub"] = (
+            combined[dd] / combined[gh].replace(0, np.nan)
+        )
     if all(c in combined.columns for c in [dd, ue, ic]):
         total = combined[[dd, ue, ic]].sum(axis=1).replace(0, np.nan)
         combined["three_way_doordash_share"] = combined[dd] / total
+    if all(c in combined.columns for c in [dd, ue, ic, gh]):
+        total = combined[[dd, ue, ic, gh]].sum(axis=1).replace(0, np.nan)
+        combined["four_way_doordash_share"] = combined[dd] / total
 
     if "food delivery" in combined.columns:
         combined["food_delivery_momentum"] = combined["food delivery"].rolling(4, min_periods=2).mean()
     if "DashPass" in combined.columns:
         combined["dashpass_momentum"] = combined["DashPass"].rolling(4, min_periods=2).mean()
+    if "Grubhub+" in combined.columns:
+        combined["grubhub_plus_momentum"] = combined["Grubhub+"].rolling(4, min_periods=2).mean()
 
     # ── STL seasonal adjustment for DoorDash index ──────────────────────────────
     combined = _add_seasonal_adjustment(combined)
