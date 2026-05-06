@@ -81,49 +81,70 @@ def _car_for_window(daily: pd.DataFrame, abnormal_col: str,
 
 
 def build_event_table(ticker: str = "DASH") -> pd.DataFrame:
-    """Per-event CAR table for one ticker. Hybrid CRSP + yfinance source."""
+    """Per-event CAR table for one ticker. Three-tier source resolution:
+
+      1. "CRSP"                — CRSP stock + CRSP DSI value-weighted market
+      2. "CRSP_stock_SPY_mkt"  — CRSP CIZ stock + SPY (yfinance) market when
+                                  DSI doesn't cover the date but CIZ does
+      3. "yfinance_SPY"        — yfinance stock + yfinance SPY (full fallback)
+
+    Tier 2 emerged when we upgraded CRSP to CIZ (dsf_v2): stock returns
+    extend to 2025-12-31 but DSI is still legacy through 2024-12-31, so
+    Q4 2024–Q3 2025 events get CRSP stock with SPY proxy market.
+    """
     crsp = load_crsp_data()
     yfin = load_yfinance_for_event_study(ticker=ticker)
     crsp_t = crsp[crsp["ticker"] == ticker].copy() if not crsp.empty else pd.DataFrame()
 
+    # Build a per-day panel with all three abnormal-return candidates
+    if not crsp_t.empty and not yfin.empty:
+        panel = crsp_t[["date", "ret_stock", "ret_market_vwretd",
+                          "abnormal_return"]].rename(
+            columns={"ret_stock": "ret_stock_crsp",
+                      "abnormal_return": "abnormal_crsp_full"})
+        panel = panel.merge(yfin[["date", "ret_market_spy", "abnormal_return_yf"]],
+                              on="date", how="outer")
+        # Tier 2: CRSP stock − SPY market  (when CRSP stock available but DSI not)
+        panel["abnormal_crsp_spy"] = panel["ret_stock_crsp"] - panel["ret_market_spy"]
+        panel = panel.sort_values("date").reset_index(drop=True)
+    elif not yfin.empty:
+        panel = yfin[["date", "abnormal_return_yf"]].copy()
+        panel["abnormal_crsp_full"] = np.nan
+        panel["abnormal_crsp_spy"] = np.nan
+    else:
+        return pd.DataFrame()
+
     rows = []
     for quarter, event_date_str in EARNINGS_DATES.items():
         event_date = pd.Timestamp(event_date_str)
-        car_p_crsp = car_t_crsp = (np.nan, "no_crsp")
-        car_p_yf = car_t_yf = (np.nan, "no_yf")
 
-        # Try CRSP first — only if the event window is within CRSP coverage
-        if not crsp_t.empty:
-            crsp_max = crsp_t["date"].max()
-            if event_date + pd.Timedelta(days=10) <= crsp_max:
-                car_p_crsp = _car_for_window(crsp_t, "abnormal_return",
-                                              event_date, CAR_WINDOWS["primary"])
-                car_t_crsp = _car_for_window(crsp_t, "abnormal_return",
-                                              event_date, CAR_WINDOWS["tight"])
-
-        # yfinance fallback
-        if not yfin.empty:
-            car_p_yf = _car_for_window(yfin, "abnormal_return_yf",
-                                        event_date, CAR_WINDOWS["primary"])
-            car_t_yf = _car_for_window(yfin, "abnormal_return_yf",
-                                        event_date, CAR_WINDOWS["tight"])
-
-        if car_p_crsp[1] == "ok":
-            car_p, car_t, src = car_p_crsp[0], car_t_crsp[0], "CRSP"
-        elif car_p_yf[1] == "ok":
-            car_p, car_t, src = car_p_yf[0], car_t_yf[0], "yfinance_SPY"
+        # Try in priority order
+        for col, src in [("abnormal_crsp_full",  "CRSP"),
+                         ("abnormal_crsp_spy",   "CRSP_stock_SPY_mkt"),
+                         ("abnormal_return_yf",  "yfinance_SPY")]:
+            if col not in panel.columns:
+                continue
+            car_p, status_p = _car_for_window(panel, col, event_date, CAR_WINDOWS["primary"])
+            if status_p == "ok":
+                car_t, _ = _car_for_window(panel, col, event_date, CAR_WINDOWS["tight"])
+                rows.append({
+                    "ticker":               ticker,
+                    "quarter_label":        quarter,
+                    "earnings_date":        event_date_str,
+                    "car_minus1_plus2_pct": car_p * 100,
+                    "car_0_plus1_pct":      (car_t * 100) if pd.notna(car_t) else np.nan,
+                    "source":               src,
+                })
+                break
         else:
-            car_p = car_t = np.nan
-            src = "missing"
-
-        rows.append({
-            "ticker":               ticker,
-            "quarter_label":        quarter,
-            "earnings_date":        event_date_str,
-            "car_minus1_plus2_pct": (car_p * 100) if pd.notna(car_p) else np.nan,
-            "car_0_plus1_pct":      (car_t * 100) if pd.notna(car_t) else np.nan,
-            "source":               src,
-        })
+            rows.append({
+                "ticker":               ticker,
+                "quarter_label":        quarter,
+                "earnings_date":        event_date_str,
+                "car_minus1_plus2_pct": np.nan,
+                "car_0_plus1_pct":      np.nan,
+                "source":               "missing",
+            })
 
     return pd.DataFrame(rows)
 
@@ -185,16 +206,18 @@ def plot_event_study(beta3: dict, applied: dict, out_path: Path) -> None:
     merged = beta3["merged"]
     fig, ax = plt.subplots(figsize=(11, 6))
 
-    crsp_pts = merged[merged["source"] == "CRSP"]
-    yfin_pts = merged[merged["source"] == "yfinance_SPY"]
-    if not crsp_pts.empty:
-        ax.scatter(crsp_pts["gov_surprise_pct"], crsp_pts["car_minus1_plus2_pct"],
-                   s=80, color=COLORS["dash_primary"],
-                   label=f"CRSP (n={len(crsp_pts)})", zorder=3)
-    if not yfin_pts.empty:
-        ax.scatter(yfin_pts["gov_surprise_pct"], yfin_pts["car_minus1_plus2_pct"],
-                   s=80, color=COLORS["forecast"], marker="^",
-                   label=f"yfinance fallback (n={len(yfin_pts)})", zorder=3)
+    sources = [
+        ("CRSP",                 COLORS["dash_primary"], "o", "CRSP stock + CRSP DSI"),
+        ("CRSP_stock_SPY_mkt",   COLORS["actual"],       "s", "CRSP stock + SPY market"),
+        ("yfinance_SPY",         COLORS["forecast"],     "^", "yfinance fallback"),
+    ]
+    for src_key, color, marker, label_root in sources:
+        pts = merged[merged["source"] == src_key]
+        if pts.empty:
+            continue
+        ax.scatter(pts["gov_surprise_pct"], pts["car_minus1_plus2_pct"],
+                   s=80, color=color, marker=marker,
+                   label=f"{label_root} (n={len(pts)})", zorder=3)
 
     for _, r in merged.iterrows():
         ax.annotate(r["quarter_label"].replace("_", " "),

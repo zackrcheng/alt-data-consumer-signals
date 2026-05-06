@@ -79,41 +79,45 @@ def _get_wrds_connection():
 # ── Data pull ────────────────────────────────────────────────────────────────
 
 def _lookup_permnos(db, tickers: list[str]) -> pd.DataFrame:
-    """Resolve tickers → CRSP permnos via crsp.stocknames.
+    """Resolve tickers → CRSP permnos via the CIZ stocknames_v2 table.
 
-    A ticker may map to multiple permnos over time (renames, mergers).
-    For DASH/UBER/CART (recent IPOs) there's a single permno per ticker.
+    CIZ uses securitybegdt / securityenddt instead of namedt / nameenddt.
+    A ticker may map to multiple permnos over time; for DASH/UBER/CART
+    (recent IPOs) there's a single permno per ticker.
     """
     ticker_sql = ", ".join(f"'{t}'" for t in tickers)
     query = f"""
-        SELECT DISTINCT permno, ticker, comnam, namedt, nameenddt
-        FROM crsp.stocknames
+        SELECT DISTINCT permno, ticker, issuernm, securitybegdt, securityenddt
+        FROM crsp.stocknames_v2
         WHERE ticker IN ({ticker_sql})
-          AND nameenddt >= '2018-01-01'
-        ORDER BY ticker, namedt
+          AND securityenddt >= '2018-01-01'
+        ORDER BY ticker, securitybegdt
     """
     df = db.raw_sql(query)
-    print(f"  crsp.stocknames matches:")
+    print(f"  crsp.stocknames_v2 matches:")
     for _, row in df.iterrows():
         print(f"    {row['ticker']:6s}  permno={row['permno']:8.0f}  "
-              f"{row['comnam']:30s}  {row['namedt']} → {row['nameenddt']}")
+              f"{row['issuernm']:30s}  {row['securitybegdt']} → {row['securityenddt']}")
     return df
 
 
 def _pull_daily_returns(db, permnos: list[float], start: str = "2018-01-01"
                           ) -> pd.DataFrame:
-    """Pull daily total returns from crsp.dsf for the given permnos."""
+    """Pull daily total returns from crsp.dsf_v2 (CIZ — coverage through
+    2025-12-31). CIZ uses dlycaldt/dlyret/dlyprc/dlyvol column names."""
     permno_sql = ", ".join(str(int(p)) for p in permnos)
     query = f"""
-        SELECT date, permno, ret, prc, vol
-        FROM crsp.dsf
+        SELECT dlycaldt AS date, permno, dlyret AS ret,
+               dlyprc AS prc, dlyvol AS vol
+        FROM crsp.dsf_v2
         WHERE permno IN ({permno_sql})
-          AND date >= '{start}'
-        ORDER BY permno, date
+          AND dlycaldt >= '{start}'
+        ORDER BY permno, dlycaldt
     """
     df = db.raw_sql(query)
     df["date"] = pd.to_datetime(df["date"])
-    print(f"  crsp.dsf returned {len(df):,} stock-day rows")
+    print(f"  crsp.dsf_v2 (CIZ) returned {len(df):,} stock-day rows  "
+          f"(through {df['date'].max().date()})")
     return df
 
 
@@ -144,8 +148,9 @@ def pull_crsp(tickers: list[str] | None = None, start: str = "2018-01-01"
             print("  No permnos found — check ticker spelling.")
             return pd.DataFrame()
 
-        # Keep one permno per ticker (the most recent if ticker was reused)
-        keep = (names.sort_values(["ticker", "namedt"], ascending=[True, False])
+        # Keep one permno per ticker — most recent securitybegdt wins
+        # (handles ticker reuse: e.g. CART = Carolina Trust Bank pre-2019, then Maplebear)
+        keep = (names.sort_values(["ticker", "securitybegdt"], ascending=[True, False])
                        .drop_duplicates(subset=["ticker"], keep="first"))
         ticker_to_permno = dict(zip(keep["ticker"], keep["permno"]))
         print(f"\n  Using permnos: {ticker_to_permno}")
