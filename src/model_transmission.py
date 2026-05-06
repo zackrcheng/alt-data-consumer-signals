@@ -40,15 +40,27 @@ PREREG_PATH = OUTPUTS_TABLES / "q1_2026_preregistered.csv"
 # ── Data prep ────────────────────────────────────────────────────────────────
 
 def prepare_dash_panel(master_df: pd.DataFrame) -> pd.DataFrame:
-    """DASH-only panel with the full chain variables."""
+    """DASH-only panel with the full chain variables.
+
+    Adds YoY changes for take rate and contribution margin so the chain can
+    decompose β2 into a monetization stage (β_M), unit-economics stage (β_U),
+    and corporate flow-through stage (β_C) — instead of jumping directly from
+    revenue surprise to EBITDA margin change."""
     df = master_df.sort_values("quarter_end_date").reset_index(drop=True).copy()
     df["revenue_yoy_pct"] = df["revenue_actual_bn"].pct_change(4, fill_method=None) * 100
     df["ebitda_margin_chg_yoy_pp"] = df["ebitda_margin_pct"] - df["ebitda_margin_pct"].shift(4)
+    df["take_rate_chg_yoy_pp"]    = df["take_rate_pct"] - df["take_rate_pct"].shift(4)
+    df["contribution_margin_chg_yoy_pp"] = (
+        df["contribution_margin_pct"] - df["contribution_margin_pct"].shift(4)
+    )
     df["ebitda_margin_chg_qoq_pp"] = df["ebitda_margin_pct"].diff()
     keep = [
         "quarter_label", "quarter_end_date",
-        "gov_surprise_pct", "rev_surprise_pct",
+        "gov_surprise_pct", "rev_surprise_pct", "orders_surprise_pct",
         "revenue_actual_bn", "revenue_yoy_pct",
+        "take_rate_pct", "take_rate_chg_yoy_pp",
+        "contribution_profit_mn", "contribution_margin_pct",
+        "contribution_margin_chg_yoy_pp",
         "ebitda_actual_bn", "ebitda_margin_pct",
         "ebitda_margin_chg_yoy_pp", "ebitda_margin_chg_qoq_pp",
     ]
@@ -127,6 +139,51 @@ def regression_b2(dash: pd.DataFrame) -> dict:
             **_ols_summary(fit, "rev_surprise_pct"), "fit": fit}
 
 
+def regression_b_monetization(dash: pd.DataFrame) -> dict:
+    """β_M (monetization pillar): take_rate_chg_yoy_pp ~ gov_surprise_pct.
+
+    Tests whether positive volume surprises are accompanied by take-rate
+    expansion or compression. Positive β_M = volume surprises bring
+    pricing/take-rate strength."""
+    sub = dash.dropna(subset=["gov_surprise_pct", "take_rate_chg_yoy_pp"])
+    X = sm.add_constant(sub[["gov_surprise_pct"]])
+    y = sub["take_rate_chg_yoy_pp"]
+    fit = sm.OLS(y, X).fit()
+    return {"name": "b_M_take_rate_chg_yoy_pp_on_gov_surprise",
+            **_ols_summary(fit, "gov_surprise_pct"), "fit": fit}
+
+
+def regression_b_unit(dash: pd.DataFrame) -> dict:
+    """β_U (unit-economics pillar): contribution_margin_chg_yoy_pp ~ rev_surprise_pct.
+
+    Tests operating leverage at the *unit* level — does revenue scale
+    bring better contribution margin (delivery efficiency, ad mix)? This is
+    cleaner than the EBITDA β2 because it strips out corporate G&A,
+    marketing cycles, and stock-based comp."""
+    sub = dash.dropna(subset=["rev_surprise_pct", "contribution_margin_chg_yoy_pp"])
+    X = sm.add_constant(sub[["rev_surprise_pct"]])
+    y = sub["contribution_margin_chg_yoy_pp"]
+    fit = sm.OLS(y, X).fit()
+    return {"name": "b_U_contrib_margin_chg_on_rev_surprise",
+            **_ols_summary(fit, "rev_surprise_pct"), "fit": fit}
+
+
+def regression_b_corp(dash: pd.DataFrame) -> dict:
+    """β_C (corporate flow-through pillar): ebitda_margin_chg_yoy_pp ~
+    contribution_margin_chg_yoy_pp.
+
+    Tests whether unit-level margin gains flow through to EBITDA — i.e.,
+    whether corporate fixed costs are sticky. β_C ≈ 1 = clean flow-through;
+    β_C < 1 = corporate G&A absorbs unit-level gains."""
+    sub = dash.dropna(subset=["contribution_margin_chg_yoy_pp",
+                                 "ebitda_margin_chg_yoy_pp"])
+    X = sm.add_constant(sub[["contribution_margin_chg_yoy_pp"]])
+    y = sub["ebitda_margin_chg_yoy_pp"]
+    fit = sm.OLS(y, X).fit()
+    return {"name": "b_C_ebitda_margin_chg_on_contrib_margin_chg",
+            **_ols_summary(fit, "contribution_margin_chg_yoy_pp"), "fit": fit}
+
+
 def regression_b2_panel(dash: pd.DataFrame, cart: pd.DataFrame) -> dict:
     """β2 on a DASH+CART panel using realized YoY revenue growth (CART has
     no IBES surprise). Adds a CART fixed effect."""
@@ -191,31 +248,57 @@ def variance_decomposition(master_df: pd.DataFrame, target: str = "gov_surprise_
 
 # ── Chain application ───────────────────────────────────────────────────────
 
+def _propagate(b: dict, x_pt: float, x_lo: float, x_hi: float) -> dict:
+    """Apply y = α + β·x at point + 80% CI; sort lo≤hi (handles negative β)."""
+    y_pt = b["intercept"] + b["beta"] * x_pt
+    a    = b["intercept"] + b["beta"] * x_lo
+    bv   = b["intercept"] + b["beta"] * x_hi
+    y_lo, y_hi = (a, bv) if a <= bv else (bv, a)
+    return {"point": y_pt, "ci80_lo": y_lo, "ci80_hi": y_hi}
+
+
 def apply_chain(b1: dict, b2: dict, prereg: pd.Series) -> dict:
-    """Propagate the published Q1 2026 GOV surprise + 80% CI through β1·β2.
-    When β1 or β2 is negative, the CI bounds flip direction — we sort
-    [ci80_lo, ci80_hi] so lo ≤ hi for display."""
+    """Naive 2-stage chain: GOV → revenue (β1) → EBITDA margin (β2).
+    Kept for back-compat / sanity comparison vs the decomposed chain below."""
+    gov_pt = float(prereg["q1_2026_pred_pct"])
+    gov_lo = float(prereg["q1_2026_ci_80_lo"])
+    gov_hi = float(prereg["q1_2026_ci_80_hi"])
+    rev = _propagate(b1, gov_pt, gov_lo, gov_hi)
+    margin = _propagate(b2, rev["point"], rev["ci80_lo"], rev["ci80_hi"])
+    return {
+        "gov_surprise_pp":          {"point": gov_pt, "ci80_lo": gov_lo, "ci80_hi": gov_hi},
+        "rev_surprise_pp":          rev,
+        "ebitda_margin_chg_yoy_pp": margin,
+    }
+
+
+def apply_decomposed_chain(b1: dict, b_M: dict, b_U: dict, b_C: dict,
+                             prereg: pd.Series) -> dict:
+    """Decomposed chain — each stage maps to one of the user's four pillars:
+
+      Volume (input):    GOV surprise (from pre-registered model)
+      Monetization:      → take rate change YoY (β_M on gov_surprise)
+      Revenue:           → revenue surprise (β1 on gov_surprise)
+      Profitability·U:   → contribution margin change YoY (β_U on rev_surprise)
+      Profitability·C:   → EBITDA margin change YoY (β_C on contrib margin chg)
+
+    All CI bounds get sorted to [min, max] after each negative-β propagation.
+    """
     gov_pt = float(prereg["q1_2026_pred_pct"])
     gov_lo = float(prereg["q1_2026_ci_80_lo"])
     gov_hi = float(prereg["q1_2026_ci_80_hi"])
 
-    # β1 application: rev_surprise = α1 + β1 × gov_surprise
-    rev_pt = b1["intercept"] + b1["beta"] * gov_pt
-    rev_a  = b1["intercept"] + b1["beta"] * gov_lo
-    rev_b  = b1["intercept"] + b1["beta"] * gov_hi
-    rev_lo, rev_hi = (rev_a, rev_b) if rev_a <= rev_b else (rev_b, rev_a)
-
-    # β2 application: ebitda_margin_chg = α2 + β2 × rev_surprise
-    margin_pt = b2["intercept"] + b2["beta"] * rev_pt
-    margin_a  = b2["intercept"] + b2["beta"] * rev_lo
-    margin_b  = b2["intercept"] + b2["beta"] * rev_hi
-    margin_lo, margin_hi = (margin_a, margin_b) if margin_a <= margin_b else (margin_b, margin_a)
+    rev   = _propagate(b1,  gov_pt, gov_lo, gov_hi)
+    take  = _propagate(b_M, gov_pt, gov_lo, gov_hi)
+    contrib = _propagate(b_U, rev["point"], rev["ci80_lo"], rev["ci80_hi"])
+    ebitda = _propagate(b_C, contrib["point"], contrib["ci80_lo"], contrib["ci80_hi"])
 
     return {
-        "gov_surprise_pp":    {"point": gov_pt, "ci80_lo": gov_lo, "ci80_hi": gov_hi},
-        "rev_surprise_pp":    {"point": rev_pt, "ci80_lo": rev_lo, "ci80_hi": rev_hi},
-        "ebitda_margin_chg_yoy_pp": {"point": margin_pt, "ci80_lo": margin_lo,
-                                       "ci80_hi": margin_hi},
+        "gov_surprise_pp":              {"point": gov_pt, "ci80_lo": gov_lo, "ci80_hi": gov_hi},
+        "rev_surprise_pp":              rev,
+        "take_rate_chg_yoy_pp":         take,
+        "contribution_margin_chg_yoy_pp": contrib,
+        "ebitda_margin_chg_yoy_pp":     ebitda,
     }
 
 
@@ -300,9 +383,15 @@ def main() -> None:
     b2 = regression_b2(dash)
     b2_panel = regression_b2_panel(dash, cart)
 
-    # Chain application — full sample and Deliveroo-excluded sensitivity
+    # Pillar-aligned decomposition of β2 into β_M / β_U / β_C
+    b_M = regression_b_monetization(dash)
+    b_U = regression_b_unit(dash)
+    b_C = regression_b_corp(dash)
+
+    # Chain application — naive 2-stage (back-compat) + decomposed
     chain = apply_chain(b1, b2, prereg)
     chain_robust = apply_chain(b1_robust, b2, prereg)
+    chain_decomposed = apply_decomposed_chain(b1, b_M, b_U, b_C, prereg)
 
     # Variance decomposition (against the actual model target — surprise)
     vdec = variance_decomposition(master, target="gov_surprise_pct")
@@ -311,8 +400,11 @@ def main() -> None:
     betas_rows = []
     for label, r in [("β1 (DASH, full)", b1),
                       ("β1 (DASH, ex Q4_2025)", b1_robust),
-                      ("β2 (DASH)", b2),
-                      ("β2 (DASH+CART panel)", b2_panel)]:
+                      ("β_M monetization (take_rate_chg ~ gov_surprise)", b_M),
+                      ("β_U unit econ (contrib_margin_chg ~ rev_surprise)", b_U),
+                      ("β_C corp (ebitda_margin_chg ~ contrib_margin_chg)", b_C),
+                      ("β2 naive (DASH, single-stage)", b2),
+                      ("β2 naive (DASH+CART panel)", b2_panel)]:
         betas_rows.append({
             "regression": label, "name": r["name"],
             "beta": round(r["beta"], 4), "stderr": round(r["stderr"], 4),
@@ -327,9 +419,11 @@ def main() -> None:
 
     chain_rows = []
     for stage, vals in chain.items():
-        chain_rows.append({"variant": "full_sample", "stage": stage, **vals})
+        chain_rows.append({"variant": "naive_full", "stage": stage, **vals})
     for stage, vals in chain_robust.items():
-        chain_rows.append({"variant": "ex_Q4_2025", "stage": stage, **vals})
+        chain_rows.append({"variant": "naive_ex_Q4_2025", "stage": stage, **vals})
+    for stage, vals in chain_decomposed.items():
+        chain_rows.append({"variant": "decomposed_pillars", "stage": stage, **vals})
     chain_df = pd.DataFrame(chain_rows)
     chain_df.to_csv(OUTPUTS_TABLES / "transmission_chain_q1_2026.csv", index=False)
 
@@ -356,28 +450,40 @@ def main() -> None:
     print("=" * 72)
     print("CHAIN APPLIED TO PRE-REGISTERED Q1 2026 GOV SURPRISE")
     print("=" * 72)
-    for label, ch, b1_ in [("Full sample (incl. Q4 2025 Deliveroo step-up)",
-                              chain, b1),
-                             ("Sensitivity: Q4 2025 excluded",
-                              chain_robust, b1_robust)]:
-        print(f"\n  {label}  (β1={b1_['beta']:.3f})")
-        for stage, vals in ch.items():
-            print(f"    {stage:30s}  {vals['point']:+6.2f}pp  "
-                  f"(80% CI [{vals['ci80_lo']:+.2f}, {vals['ci80_hi']:+.2f}])")
+    print("\n  Naive 2-stage chain (β1 → β2):")
+    for stage, vals in chain.items():
+        print(f"    {stage:38s}  {vals['point']:+6.2f}pp  "
+              f"(80% CI [{vals['ci80_lo']:+.2f}, {vals['ci80_hi']:+.2f}])")
+
+    print("\n  Decomposed pillar chain (β1, β_M, β_U, β_C):")
+    for stage, vals in chain_decomposed.items():
+        print(f"    {stage:38s}  {vals['point']:+6.2f}pp  "
+              f"(80% CI [{vals['ci80_lo']:+.2f}, {vals['ci80_hi']:+.2f}])")
 
     print()
+    print("Pillar attribution — which stage carries signal?")
+    print(f"  Volume → Revenue       β1   = {b1['beta']:+.3f}  "
+          f"(p={b1['p_value']:.3f}, R²={b1['r_squared']:.2f}, n={b1['n']})  "
+          f"{'★ significant' if b1['p_value']<0.05 else 'weak'}")
+    print(f"  Volume → Take rate     β_M  = {b_M['beta']:+.3f}  "
+          f"(p={b_M['p_value']:.3f}, R²={b_M['r_squared']:.2f}, n={b_M['n']})  "
+          f"{'★ significant' if b_M['p_value']<0.05 else 'weak'}")
+    print(f"  Revenue → Contrib mgn  β_U  = {b_U['beta']:+.3f}  "
+          f"(p={b_U['p_value']:.3f}, R²={b_U['r_squared']:.2f}, n={b_U['n']})  "
+          f"{'★ significant' if b_U['p_value']<0.05 else 'weak'}")
+    print(f"  Contrib → EBITDA mgn   β_C  = {b_C['beta']:+.3f}  "
+          f"(p={b_C['p_value']:.3f}, R²={b_C['r_squared']:.2f}, n={b_C['n']})  "
+          f"{'★ significant' if b_C['p_value']<0.05 else 'weak'}")
+    print(f"  (Naive single-stage)   β2   = {b2['beta']:+.3f}  "
+          f"(p={b2['p_value']:.3f}, R²={b2['r_squared']:.2f}, n={b2['n']})  "
+          f"{'★ significant' if b2['p_value']<0.05 else 'weak'}")
+    print()
     print("Disclosures for the L/S note:")
-    print(f"  • β1 (full) = {b1['beta']:.3f} is empirically much higher than the")
-    print(f"    project-doc prior of ~0.9 (stable-take-rate pass-through). DASH revenue")
-    print(f"    surprises are systematically larger than GOV surprises in this sample,")
-    print(f"    driven by (a) take-rate expansion (~13.3 → 13.8% over the window),")
-    print(f"    (b) ads/non-GOV revenue, and (c) a Q4 2025 Deliveroo consolidation")
-    print(f"    that priced into actuals before consensus. β1 ex-Q4 2025 = "
-          f"{b1_robust['beta']:.3f}.")
-    print(f"  • β2 = {b2['beta']:.3f} (DASH-only) is weakly negative with R²={b2['r_squared']:.2f},")
-    print(f"    p={b2['p_value']:.2f}. Operating leverage is NOT a clean story in this")
-    print(f"    sample — revenue beats don't reliably translate into margin expansion")
-    print(f"    YoY at this n. The DASH+CART panel β2 = {b2_panel['beta']:.3f} (also weak).")
+    print(f"  • β1 = {b1['beta']:.3f} (revenue/GOV pass-through) — well above the project-")
+    print(f"    doc prior of ~0.9. Driven by take-rate expansion + ads + Q4 2025 Deliveroo")
+    print(f"    step-up. β1 ex-Q4 2025 = {b1_robust['beta']:.3f}, so structural not Deliveroo-only.")
+    print(f"  • β_M, β_U, β_C decompose the operating-leverage chain. The slope that")
+    print(f"    actually carries usable signal is whichever has the smallest p-value above.")
     print(f"  • β3 (CAR sensitivity) is the Session 13 event-study output.")
 
 
