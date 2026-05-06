@@ -1,0 +1,203 @@
+[
+  {
+    "id": "9156326345",
+    "type": "PublicEvent",
+    "actor": {
+      "id": 174290056,
+      "login": "zackrcheng",
+      "display_login": "zackrcheng",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/zackrcheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/174290056?"
+    },
+    "repo": {
+      "id": 1230512458,
+      "name": "zackrcheng/alt-data-consumer-signals",
+      "url": "https://api.github.com/repos/zackrcheng/alt-data-consumer-signals"
+    },
+    "payload": {
+
+    },
+    "public": true,
+    "created_at": "2026-05-06T04:19:23Z"
+  },
+  {
+    "id": "11499211446",
+    "type": "PushEvent",
+    "actor": {
+      "id": 174290056,
+      "login": "zackrcheng",
+      "display_login": "zackrcheng",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/zackrcheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/174290056?"
+    },
+    "repo": {
+      "id": 1230512458,
+      "name": "zackrcheng/alt-data-consumer-signals",
+      "url": "https://api.github.com/repos/zackrcheng/alt-data-consumer-signals"
+    },
+    "payload": {
+      "repository_id": 1230512458,
+      "push_id": 33790386686,
+      "ref": "refs/heads/main",
+      "head": "ce9f29585f4cab26f80401de4cd454aa71c7dc9b",
+      "before": "d88b6e7da5493788b8771fa7f142c18eb6f7f624"
+    },
+    "public": true,
+    "created_at": "2026-05-06T17:02:39Z"
+  },
+  {
+    "id": "11497558885",
+    "type": "PushEvent",
+    "actor": {
+      "id": 174290056,
+      "login": "zackrcheng",
+      "display_login": "zackrcheng",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/zackrcheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/174290056?"
+    },
+    "repo": {
+      "id": 1230512458,
+      "name": "zackrcheng/alt-data-consumer-signals",
+      "url": "https://api.github.com/repos/zackrcheng/alt-data-consumer-signals"
+    },
+    "payload": {
+      "repository_id": 1230512458,
+      "push_id": 33788734449,
+      "ref": "refs/heads/main",
+      "head": "d88b6e7da5493788b8771fa7f142c18eb6f7f624",
+      "before": "13c37376bd05ee8386eb0ce58e18b8c4fd74c1f9"
+    },
+    "public": true,
+    "created_at": "2026-05-06T16:21:20Z"
+  },
+  {
+    "id": "11497366315",
+    "type": "PushEvent",
+    "actor": {
+      "id": 174290056,
+      "login": "zackrcheng",
+      "display_login": "zackrcheng",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/zackrcheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/174290056?"
+    },
+    "repo": {
+      "id": 1230512458,
+      "name": "zackrcheng/alt-data-consumer-signals",
+      "url": "https://api.github.com/repos/zackrcheng/alt-data-consumer-signals"
+    },
+    "payload": {
+      "repository_id": 1230512458,
+      "push_id": 33788542221,
+      "ref": "refs/heads/main",
+      "head": "13c37376bd05ee8386eb0ce58e18b8c4fd74c1f9",
+      "before": "785f19036c90fdca16e1c05418053c112e4d12f1"
+    },
+    "public": true,
+    "created_at": "2026-05-06T16:16:33Z"
+  },
+  {
+    "id": "11471263191",
+    "type": "PushEvent",
+    "actor": {
+      "id": 174290056,
+      "login": "zackrcheng",
+      "display_login": "zackrcheng",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/zackrcheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/174290056?"
+    },
+    "repo": {
+      "id": 1230512458,
+      "name": "zackrcheng/alt-data-consumer-signals",
+      "url": "https://api.github.com/repos/zackrcheng/alt-data-consumer-signals"
+    },
+    "payload": {
+      "repository_id": 1230512458,
+      "push_id": 33762459383,
+      "ref": "refs/heads/main",
+      "head": "785f19036c90fdca16e1c05418053c112e4d12f1",
+      "before": "32930e3db52d0df4f93fe97e7a5ee2e070ef287d"
+    },
+    "public": true,
+    "created_at": "2026-05-06T05:24:29Z"
+  },
+  {
+    "id": "11470206028",
+    "type": "PushEvent",
+    "actor": {
+      "id": 174290056,
+      "login": "zackrcheng",
+      "display_login": "zackrcheng",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/zackrcheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/174290056?"
+    },
+    "repo": {
+      "id": 1230512458,
+      "name": "zackrcheng/alt-data-consumer-signals",
+      "url": "https://api.github.com/repos/zackrcheng/alt-data-consumer-signals"
+    },
+    "payload": {
+      "repository_id": 1230512458,
+      "push_id": 33761402608,
+      "ref": "refs/heads/main",
+      "head": "32930e3db52d0df4f93fe97e7a5ee2e070ef287d",
+      "before": "fa06602db07e4fa7100669b0f3ef04d28feceabf"
+    },
+    "public": true,
+    "created_at": "2026-05-06T04:41:53Z"
+  },
+  {
+    "id": "9130259060",
+    "type": "WatchEvent",
+    "actor": {
+      "id": 174290056,
+      "login": "zackrcheng",
+      "display_login": "zackrcheng",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/zackrcheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/174290056?"
+    },
+    "repo": {
+      "id": 1230512458,
+      "name": "zackrcheng/alt-data-consumer-signals",
+      "url": "https://api.github.com/repos/zackrcheng/alt-data-consumer-signals"
+    },
+    "payload": {
+      "action": "started"
+    },
+    "public": true,
+    "created_at": "2026-05-06T04:25:40Z"
+  },
+  {
+    "id": "11469790754",
+    "type": "CreateEvent",
+    "actor": {
+      "id": 174290056,
+      "login": "zackrcheng",
+      "display_login": "zackrcheng",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/zackrcheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/174290056?"
+    },
+    "repo": {
+      "id": 1230512458,
+      "name": "zackrcheng/alt-data-consumer-signals",
+      "url": "https://api.github.com/repos/zackrcheng/alt-data-consumer-signals"
+    },
+    "payload": {
+      "ref": "main",
+      "ref_type": "branch",
+      "full_ref": "refs/heads/main",
+      "master_branch": "main",
+      "description": "Multi-pillar L/S equity research on DoorDash (DASH): alt-data signals → GOV surprise forecast → revenue / contribution-margin / EBITDA chain →         DASH-vs-UBER cross-sectional spread → CAR event study. Pre-registered Q1 2026 prediction. ",
+      "pusher_type": "user"
+    },
+    "public": true,
+    "created_at": "2026-05-06T04:25:18Z"
+  }
+]
