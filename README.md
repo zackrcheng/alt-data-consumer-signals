@@ -179,3 +179,4 @@ The four-pillar L/S note from `notebooks/04_CrossSectional.ipynb` §6:
 - Public data sources (Google Trends, FRED, yfinance, App Store reviews,
   Reddit Arctic Shift, Open-Meteo) are redistributable per their
   respective terms.
+
