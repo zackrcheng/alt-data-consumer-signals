@@ -45,14 +45,15 @@ from src.config import (
     UBER_GOV_MASTER_PATH, MASTER_DF_PATH, GOOGLE_TRENDS_PATH, APPSTORE_PATH,
     IBES_CONSENSUS_PATH, FORECAST_QUARTER, OUTPUTS_TABLES, OUTPUTS_FIGURES,
     RANDOM_SEED, TRENDS_WINDOW_WEEKS, TRENDS_LAG_WEEKS, QUARTER_END_DATES,
+    PREREG_PATH, MIN_VALID_TRAIN_ROWS, MIN_VALID_FOR_TOP_PICK, N_BOOTSTRAP_DEFAULT,
     CHART_STYLE, COLORS,
 )
 from src.utils import weekly_to_quarterly
 from src.model_gov import (
     OLSDrop, PCAModel, PLSModel, RidgeModel, LassoModel, OLS1Feat,
-    MIN_TRAIN_QUARTERS, MIN_VALID_TRAIN_ROWS, MIN_VALID_FOR_TOP_PICK,
-    N_BOOTSTRAP, run_walk_forward, evaluate, predict_q1_2026,
+    MIN_TRAIN_QUARTERS, run_walk_forward, evaluate, predict_q1_2026,
 )
+N_BOOTSTRAP = N_BOOTSTRAP_DEFAULT
 
 
 # ── UBER feature set + targets ──────────────────────────────────────────────
@@ -327,7 +328,7 @@ def main() -> None:
           f"(80% CI [{top_uber['q1_2026_ci_80_lo']:+.2f}, {top_uber['q1_2026_ci_80_hi']:+.2f}])")
 
     # Cross-sectional spread
-    prereg_dash = pd.read_csv(OUTPUTS_TABLES / "q1_2026_preregistered.csv").iloc[0]
+    prereg_dash = pd.read_csv(PREREG_PATH).iloc[0]
     spread = compute_spread(prereg_dash, top_uber)
     spread_df = pd.DataFrame([spread])
     spread_df.to_csv(OUTPUTS_TABLES / "cross_sectional_spread.csv", index=False)

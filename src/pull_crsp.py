@@ -36,44 +36,8 @@ from src.utils import print_pull_summary
 np.random.seed(42)
 
 
-# ── WRDS connection (copied pattern from pull_wrds_compustat.py) ────────────
-
-def _read_pgpass_password(hostname: str, username: str) -> str | None:
-    pgpass = os.path.expanduser("~/.pgpass")
-    if not os.path.exists(pgpass):
-        return None
-    with open(pgpass) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(":")
-            if len(parts) < 5:
-                continue
-            h, _port, _db, u, pw = parts[0], parts[1], parts[2], parts[3], ":".join(parts[4:])
-            if (h in (hostname, "*")) and (u in (username, "*")):
-                return pw
-    return None
-
-
-def _get_wrds_connection():
-    try:
-        import wrds
-    except ImportError:
-        raise ImportError("wrds not installed. Run: pip install wrds")
-    username = os.getenv("WRDS_USERNAME")
-    if not username:
-        raise EnvironmentError(
-            "WRDS_USERNAME not set. Copy .env.template to .env and add WRDS_USERNAME.")
-    password = _read_pgpass_password("wrds-pgdata.wharton.upenn.edu", username)
-    if password:
-        try:
-            db = __import__("wrds").Connection(wrds_username=username,
-                                                 wrds_password=password)
-            return db
-        except Exception as e:
-            print(f"  pgpass credentials failed ({e}). Falling back to interactive login...")
-    return __import__("wrds").Connection(wrds_username=username)
+# ── WRDS connection (consolidated to src/wrds_utils.py) ────────────────────
+from src.wrds_utils import get_wrds_connection as _get_wrds_connection
 
 
 # ── Data pull ────────────────────────────────────────────────────────────────

@@ -53,40 +53,8 @@ _SNAPSHOT_BAND_DAYS = 20   # accept snapshots within ±20 days of target
 
 
 # ── Connection ─────────────────────────────────────────────────────────────────
-
-def _get_wrds_connection():
-    """
-    Establish WRDS connection.
-    Reads password from ~/.pgpass to avoid interactive prompts in non-TTY environments.
-    """
-    try:
-        import wrds
-    except ImportError:
-        raise ImportError("wrds not installed. Run: pip install wrds")
-
-    username = os.getenv("WRDS_USERNAME")
-    if not username:
-        raise EnvironmentError(
-            "WRDS_USERNAME not set. Copy .env.template → .env and fill in your username."
-        )
-
-    # Read password from ~/.pgpass to bypass interactive getpass prompt.
-    # Format: hostname:port:database:username:password
-    password = ""
-    pgpass_path = Path.home() / ".pgpass"
-    if pgpass_path.exists():
-        for line in pgpass_path.read_text().strip().splitlines():
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(":")
-            if len(parts) == 5 and (parts[3] == username or parts[3] == "*"):
-                password = parts[4]
-                break
-
-    if password:
-        return wrds.Connection(wrds_username=username, wrds_password=password)
-    # Fall back to interactive (works in a TTY)
-    return wrds.Connection(wrds_username=username)
+# WRDS connection helper consolidated to src/wrds_utils.py — see that module.
+from src.wrds_utils import get_wrds_connection as _get_wrds_connection
 
 
 # ── Identifier mapping ─────────────────────────────────────────────────────────

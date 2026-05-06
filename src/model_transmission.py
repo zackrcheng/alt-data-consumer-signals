@@ -28,13 +28,13 @@ import pandas as pd
 import statsmodels.api as sm
 
 from src.config import (
-    MASTER_DF_PATH, COMPUSTAT_PATH,
+    MASTER_DF_PATH, COMPUSTAT_PATH, PREREG_PATH,
     OUTPUTS_TABLES, OUTPUTS_FIGURES,
     CHART_STYLE, COLORS, RANDOM_SEED,
 )
 
 
-PREREG_PATH = OUTPUTS_TABLES / "q1_2026_preregistered.csv"
+# PREREG_PATH consolidated to config.py
 
 
 # ── Data prep ────────────────────────────────────────────────────────────────

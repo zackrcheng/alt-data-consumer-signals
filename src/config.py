@@ -82,6 +82,21 @@ PRICES_HISTORY_START = "2018-01-01"
 WALK_FORWARD_MIN_TRAIN_QUARTERS = 8
 WALK_FORWARD_VALIDATION_START = "Q1_2023"
 
+# ── Modeling-framework constants (shared across model_* scripts) ─────────────
+# Minimum complete-case training rows required to fit a model in a fold.
+MIN_VALID_TRAIN_ROWS = 6
+# Variants with fewer walk-forward predictions than this are kept in the
+# comparison table for diagnostic purposes but cannot be the published top
+# pick (RMSE rankings at n<8 are sample luck, not signal).
+MIN_VALID_FOR_TOP_PICK = 8
+# Bootstrap CI iterations for model_gov / model_crosssectional Q1 2026 forecast.
+N_BOOTSTRAP_DEFAULT = 500
+# Iterative VIF dropping threshold used by OLSDrop.
+VIF_THRESHOLD = 10.0
+# Pre-registered Q1 2026 forecast file — written by model_gov.py, read by
+# model_transmission.py / model_crosssectional.py / event_study.py.
+PREREG_PATH = OUTPUTS_TABLES / "q1_2026_preregistered.csv"
+
 # Q1 2026 is the out-of-sample forecast target (earnings May 6 2026)
 FORECAST_QUARTER = "Q1_2026"
 Q1_2026_EARNINGS_DATE = "2026-05-06"

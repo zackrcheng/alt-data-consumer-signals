@@ -56,56 +56,7 @@ COMPUSTAT_FIELDS = [
 COMPUSTAT_FILTERS = "indfmt = 'INDL' AND datafmt = 'STD' AND popsrc = 'D' AND consol = 'C'"
 
 
-def _read_pgpass_password(hostname: str, username: str) -> str | None:
-    """Parse ~/.pgpass for a matching entry and return the password."""
-    pgpass = os.path.expanduser("~/.pgpass")
-    if not os.path.exists(pgpass):
-        return None
-    with open(pgpass) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(":")
-            if len(parts) < 5:
-                continue
-            h, _port, _db, u, pw = parts[0], parts[1], parts[2], parts[3], ":".join(parts[4:])
-            if (h in (hostname, "*")) and (u in (username, "*")):
-                return pw
-    return None
-
-
-def _get_wrds_connection():
-    """
-    Establish WRDS connection.
-
-    Tries the password cached in ~/.pgpass first (non-interactive). Falls
-    through to wrds.Connection(wrds_username=...) if pgpass is absent or
-    stale — wrds will prompt interactively, which requires a real TTY.
-    Run with `! python -m src.pull_wrds_compustat` in Claude Code to get a TTY.
-    """
-    try:
-        import wrds
-    except ImportError:
-        raise ImportError("wrds not installed. Run: pip install wrds")
-
-    username = os.getenv("WRDS_USERNAME")
-    if not username:
-        raise EnvironmentError(
-            "WRDS_USERNAME not set. Copy .env.template to .env and add WRDS_USERNAME."
-        )
-
-    # Try pgpass first so the script runs non-interactively when credentials are fresh.
-    password = _read_pgpass_password("wrds-pgdata.wharton.upenn.edu", username)
-    if password:
-        try:
-            db = wrds.Connection(wrds_username=username, wrds_password=password)
-            return db
-        except Exception as e:
-            print(f"  pgpass credentials failed ({e}). Falling back to interactive login...")
-
-    # Interactive fallback — requires TTY (run with ! prefix in Claude Code).
-    return wrds.Connection(wrds_username=username)
+from src.wrds_utils import get_wrds_connection as _get_wrds_connection
 
 
 def _inspect_schema(db) -> None:

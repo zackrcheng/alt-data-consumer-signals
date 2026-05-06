@@ -26,7 +26,7 @@ import statsmodels.api as sm
 
 from src.config import (
     EARNINGS_DATES, CAR_WINDOWS,
-    CRSP_EVENT_STUDY_PATH, PRICES_DAILY_PATH, MASTER_DF_PATH,
+    CRSP_EVENT_STUDY_PATH, PRICES_DAILY_PATH, MASTER_DF_PATH, PREREG_PATH,
     OUTPUTS_TABLES, OUTPUTS_FIGURES, COLORS, CHART_STYLE,
 )
 
@@ -285,7 +285,7 @@ def main() -> None:
     print(f"  n              = {beta3['n']}")
     print(f"  intercept     = {beta3['intercept']:+.3f}")
 
-    prereg = pd.read_csv(OUTPUTS_TABLES / "q1_2026_preregistered.csv").iloc[0]
+    prereg = pd.read_csv(PREREG_PATH).iloc[0]
     applied = apply_beta3_to_q1_2026(beta3, prereg)
 
     print()

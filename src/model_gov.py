@@ -60,6 +60,8 @@ from src.config import (
     GOOGLE_TRENDS_PATH, FORECAST_QUARTER, MODEL_FEATURE_COLS, CORROBORATING_COLS,
     WALK_FORWARD_MIN_TRAIN_QUARTERS, OUTPUTS_TABLES, OUTPUTS_FIGURES,
     RANDOM_SEED, TRENDS_WINDOW_WEEKS, TRENDS_LAG_WEEKS, QUARTER_END_DATES,
+    MIN_VALID_TRAIN_ROWS, MIN_VALID_FOR_TOP_PICK, N_BOOTSTRAP_DEFAULT,
+    VIF_THRESHOLD, PREREG_PATH,
     CHART_STYLE, COLORS,
 )
 
@@ -87,12 +89,8 @@ TARGET_DEMEAN_EXPANDING = "gov_surprise_demean_expanding"
 TARGETS_ALL = [TARGET_RAW, TARGET_STD, TARGET_DEMEAN_4Q, TARGET_DEMEAN_EXPANDING]
 
 MIN_TRAIN_QUARTERS = WALK_FORWARD_MIN_TRAIN_QUARTERS   # 8
-MIN_VALID_TRAIN_ROWS = 6
-MIN_VALID_FOR_TOP_PICK = 8     # variants with fewer walk-forward predictions are
-                                # ineligible to be the top variant (RMSE rankings
-                                # at n<8 are dominated by sample luck, not signal)
-N_BOOTSTRAP = 500
-VIF_THRESHOLD = 10.0
+# MIN_VALID_TRAIN_ROWS, MIN_VALID_FOR_TOP_PICK, VIF_THRESHOLD: imported from config.
+N_BOOTSTRAP = N_BOOTSTRAP_DEFAULT
 
 
 # ── Disjointness invariant ───────────────────────────────────────────────────
@@ -788,7 +786,7 @@ def main() -> None:
         "selection_rationale":  rationale,
         "note":                 "Pre-registered before Q1 2026 earnings May 6 2026",
     }])
-    prereg.to_csv(OUTPUTS_TABLES / "q1_2026_preregistered.csv", index=False)
+    prereg.to_csv(PREREG_PATH, index=False)
 
     # Plot — pass CI in the SAME units as the target the model was trained on,
     # so it overlays the walk-forward predictions cleanly.
