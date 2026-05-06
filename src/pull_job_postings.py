@@ -2,9 +2,9 @@
 pull_job_postings.py — Job posting data for DASH/UBER/CART (corroborating evidence).
 
 Role: Corroborating evidence ONLY. Never pass these columns to the OLS feature
-selector (see CLAUDE.md §18 code standards).
+selector (see project spec §18 code standards).
 
-Investment logic (CLAUDE.md §8h):
+Investment logic (project spec §8h):
   US merchant sales hiring     → near-term GOV expansion in new US markets
   International/Deliveroo      → Q2-Q3 2026 international GOV acceleration thesis
   DASH vs. UBER hiring ratio   → relative competitive intensity signal
@@ -14,7 +14,7 @@ Sources attempted (in order per spec):
   2. Greenhouse JSON API             — DoorDash careers spot check per spec;
                                        also used as peer fallback when Indeed blocks
 
-LinkedIn: excluded (ToS violation per CLAUDE.md §8h).
+LinkedIn: excluded (ToS violation per project spec §8h).
 
 Source-by-source status (verified 2026-05-04):
   - Indeed: HTTP 403 across all queries (bot detection on free tier).

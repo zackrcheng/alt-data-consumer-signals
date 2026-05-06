@@ -77,8 +77,7 @@ dash_project/
 │   ├── model_transmission.py # β1 / β_M / β_U / β_C decomposition + chain
 │   ├── model_crosssectional.py  # UBER parallel + DASH−UBER spread
 │   └── event_study.py        # β3 + Q1 2026 expected CAR
-├── CLAUDE.md                 # full project spec & §17 empirical findings
-└── README.md                 # you are here
+└── README.md                 # you are here (project overview + reproduce)
 ```
 
 ---
@@ -138,7 +137,7 @@ The four-pillar L/S note from `notebooks/04_CrossSectional.ipynb` §6:
 
 **Recommendation**: Long DASH / fade UBER · 3–6 month horizon · small-medium magnitude · medium-high conviction on direction, low-medium on magnitude.
 
-**Key empirical findings that diverged from priors** (CLAUDE.md §17):
+**Key empirical findings that diverged from priors** (see private working spec, §17):
 
 1. The surprise target (`gov_surprise_pct`) has dramatically stronger feature signal than the YoY-level target tested in early EDA — full-sample R²=0.81 vs 0.51.
 2. In-sample feature signal exists but doesn't fully survive walk-forward at n≈21. Direction is robust; magnitude has wide CI.
@@ -152,7 +151,7 @@ The four-pillar L/S note from `notebooks/04_CrossSectional.ipynb` §6:
 ## Disclaimers
 
 - **n ≈ 21 quarters**. Every β coefficient is interpreted directionally,
-  not as a precise point estimate. See CLAUDE.md §4 for the sample-size
+  not as a precise point estimate. See the private spec §4 for the sample-size
   framework and §17 for empirical findings.
 - **DASH-only models** for the GOV forecast (no pooling with UBER/CART per
   spec). UBER cross-sectional model trained on UBER data alone.

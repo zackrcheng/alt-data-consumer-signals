@@ -1,11 +1,11 @@
 """
 build_gov_table.py — assemble per-ticker GOV master tables from FactSet.
 
-FactSet is the primary consensus source (CLAUDE.md §7g). Each xlsx file is
+FactSet is the primary consensus source (project spec §7g). Each xlsx file is
 already cleaned and IR-verified by hand; this script does not re-validate
 actuals against IR filings.
 
-Outputs (CLAUDE.md §9 schema, units in column names):
+Outputs (project spec §9 schema, units in column names):
   data/processed/dash_gov_master.csv  — DASH US Marketplace GOV + decomposition
   data/processed/uber_gov_master.csv  — UBER Delivery GB (hardcoded actuals)
                                          + total-GB FactSet cross-check
@@ -33,7 +33,7 @@ from src.utils import (
 )
 
 # Q2/Q3 2021 GOV figures in FactSet were patched from later DASH shareholder
-# letters (CLAUDE.md §7g). Flagged so downstream code can disclose this.
+# letters (project spec §7g). Flagged so downstream code can disclose this.
 GOV_IR_VERIFIED_QUARTERS = {"Q2_2021", "Q3_2021"}
 
 
@@ -95,7 +95,7 @@ def build_dash_gov_master() -> pd.DataFrame:
     ) / 2
 
     # Decomposition: orders growth outpacing AOV growth = volume-driven (higher
-    # quality / more sustainable per CLAUDE.md §2). NaN-safe.
+    # quality / more sustainable per project spec §2). NaN-safe.
     df["volume_driven_beat"] = (
         df["orders_yoy_growth_pct"] > df["aov_yoy_growth_pct"]
     ).where(

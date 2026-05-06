@@ -11,7 +11,7 @@ are constructed with no look-ahead:
   • Jobs:             single forward-looking snapshot, attached to Q1 2026.
   • Autoregressive:   shift(1) on the time-sorted GOV master.
 
-Splits the output into three views per CLAUDE.md §15:
+Splits the output into three views per project spec §15:
   master_df              — everything
   model_features_df      — MODEL_FEATURE_COLS only (regression input)
   corroborating_df       — CORROBORATING_COLS only (write-up signals)
@@ -340,7 +340,7 @@ def build_master_df() -> pd.DataFrame:
     for col, val in snap.items():
         df[col] = np.where(df["quarter_label"] == FORECAST_QUARTER, val, np.nan)
 
-    # 11. CLAUDE.md §15 invariant: model features and corroborating must be disjoint
+    # 11. project spec §15 invariant: model features and corroborating must be disjoint
     overlap = set(MODEL_FEATURE_COLS) & set(CORROBORATING_COLS)
     if overlap:
         raise ValueError(f"MODEL_FEATURE_COLS ∩ CORROBORATING_COLS = {overlap}")

@@ -56,7 +56,7 @@ FACTSET_UBER_CONTRIBUTION_MARGIN_PATH = DATA_RAW / "factset_uber_contribution_ma
 FACTSET_UBER_MAPC_PATH                = DATA_RAW / "factset_uber_mapc.xlsx"                # millions
 
 # ── Ticker universe ────────────────────────────────────────────────────────────
-# MODEL INDEPENDENCE RULES — strictly enforced (see CLAUDE.md §7):
+# MODEL INDEPENDENCE RULES — strictly enforced (see project spec §7):
 #   DASH GOV model:   DASH data ONLY  → model_gov.py
 #   UBER GOV model:   UBER data ONLY  → model_crosssectional.py
 #   Panel model:      DASH + CART     → model_transmission.py  (transmission only)
@@ -126,7 +126,7 @@ TRENDS_WINDOW_WEEKS = 8
 TRENDS_LAG_WEEKS = 2
 
 # ── App store identifiers (Section 8f) ────────────────────────────────────────
-# NOT foot traffic — DASH is a delivery app, wrong causal chain (see CLAUDE.md §8f)
+# NOT foot traffic — DASH is a delivery app, wrong causal chain (see project spec §8f)
 # Review velocity = WoW change in cumulative review count = engagement/download proxy
 APPS = {
     "DASH":      {"google": "com.dd.doordash",      "ios": 719972451},
@@ -209,14 +209,14 @@ AR_FEATURE_COLS = [
 # CORROBORATING_COLS is *forbidden* — model_gov.py asserts the disjoint sets.
 MODEL_FEATURE_COLS = [
     "doordash_trends_momentum",
-    "dash_engagement_x_sentiment_mean",  # primary appstore signal (CLAUDE.md §9)
+    "dash_engagement_x_sentiment_mean",  # primary appstore signal (project spec §9)
     "consumer_health_index",
     "prior_qtr_gov_surprise_pct",
     "revision_momentum_pct",
     "jolts_transport_yoy",                # optional 6th — labor supply control
 ]
 
-# Corroborating signals — never enter the regression. CLAUDE.md §15 enforces
+# Corroborating signals — never enter the regression. project spec §15 enforces
 # the split via this list (build_master_df runs an assertion).
 CORROBORATING_COLS = [
     # Weather (already quarterly)

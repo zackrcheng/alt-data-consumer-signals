@@ -5,7 +5,7 @@ Extracted from the three pull scripts (pull_wrds_compustat, pull_wrds_ibes,
 pull_crsp) that all need an authenticated WRDS connection. Tries the password
 cached in ~/.pgpass first (non-interactive); falls back to wrds.Connection's
 interactive prompt, which requires a TTY (run with `! python -m src.pull_…`
-in Claude Code to get one).
+in an interactive shell to get one).
 """
 
 import os
