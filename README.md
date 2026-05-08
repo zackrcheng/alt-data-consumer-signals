@@ -1,9 +1,9 @@
-# DoorDash (DASH) — Multi-Metric L/S Investment Thesis
+# DoorDash (DASH) Investment Thesis
 
 A fundamental L/S equity research project that builds a quarterly forecast
 model for DASH US Marketplace GOV (Gross Order Volume) using alt-data signals,
-quantifies the GOV → revenue → EBITDA → CAR transmission chain, and
-generates a long-DASH/fade-UBER cross-sectional spread signal.
+quantifies the GOV → revenue → EBITDA (→ CAR) transmission chain, and
+generates a long-DASH view.
 
 **Pre-registered Q1 2026 forecast** (saved before the May 6 2026 print):
 
@@ -23,10 +23,10 @@ timestamped 2026-05-05 (one day before the earnings print) and committed to git.
 ## What this repo does
 
 **Question**: Is the market's implied view of DASH's US Marketplace GOV
-growth trajectory over the next 4–8 quarters wrong, and in which direction?
+growth trajectory wrong, and in which direction?
 
-**Approach**: build a four-pillar thesis stack (Volume / Monetization /
-Profitability / Relative) anchored in three statistical workflows:
+**Approach**: build a multi-pillar thesis stack (Volume / Monetization /
+Profitability) anchored in three statistical workflows:
 
 1. **GOV-surprise forecast model** (`src/model_gov.py`) — 48 model variants
    compared on walk-forward (Q1 2023 → Q4 2025). Best variant (LASSO on
@@ -37,7 +37,7 @@ Profitability / Relative) anchored in three statistical workflows:
 2. **Transmission chain** (`src/model_transmission.py`) — pillar-aligned β
    regressions: GOV → revenue (β1) → contribution margin (β_U) → EBITDA
    margin (β_C). Plus cross-sectional spread DASH − UBER from a parallel
-   UBER GB-surprise model (`src/model_crosssectional.py`).
+   UBER GB-surprise model (`src/model_crosssectional.py`) for comparison only, not for L/S view.
 
 3. **Event study** (`src/event_study.py`) — β3: CAR[-1, +2] ~ GOV surprise.
    CRSP CIZ daily returns + DSI value-weighted market via WRDS, with
@@ -135,9 +135,9 @@ The four-pillar L/S note from `notebooks/04_CrossSectional.ipynb` §6:
 | **Profitability** | β_C = +3.00 (p<0.001); EBITDA margin lift +3.9pp YoY anchored in secular contribution-margin uptrend |
 | **Relative** | DASH − UBER spread = +1.59pp, conservative 80% CI [+0.25, +4.83] (lower bound positive) |
 
-**Recommendation**: Long DASH / fade UBER · 3–6 month horizon · small-medium magnitude · medium-high conviction on direction, low-medium on magnitude.
+**Recommendation**: Long DASH · 3–6 month horizon · small magnitude · medium-high conviction on direction, low-medium conviction on magnitude.
 
-**Key empirical findings that diverged from priors** (see private working spec, §17):
+**Key empirical findings that diverged from priors**:
 
 1. The surprise target (`gov_surprise_pct`) has dramatically stronger feature signal than the YoY-level target tested in early EDA — full-sample R²=0.81 vs 0.51.
 2. In-sample feature signal exists but doesn't fully survive walk-forward at n≈21. Direction is robust; magnitude has wide CI.
